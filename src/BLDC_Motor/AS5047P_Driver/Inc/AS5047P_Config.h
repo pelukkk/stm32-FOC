@@ -10,10 +10,11 @@
 
 #include "stm32f4xx_hal.h"
 
+#define HIGH_RES
 
-#define ANGLE_FILTER_ALPHA    0.71539f  //0.71539f //   // Faktor filter
-#define MAX_ANGLE_JUMP_DEG    10.0f   // Batas maksimal lonjakan sudut (derajat)
-#define SPIKE_REJECT_COUNT    5       // Jumlah sampel untuk konfirmasi spike
+#define ANGLE_FILTER_ALPHA    0.984187f  //0.71539f //   // Faktor filter
+#define MAX_ANGLE_JUMP_DEG    50.0f   // Batas maksimal lonjakan sudut (derajat)
+#define SPIKE_REJECT_COUNT    10       // Jumlah sampel untuk konfirmasi spike
 
 // Configurations (tune these based on your system)
 #define MIN_DT_US             500UL      // Minimum 1ms interval for valid RPM (avoid division by tiny numbers)

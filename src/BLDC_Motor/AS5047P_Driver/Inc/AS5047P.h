@@ -10,7 +10,11 @@
 
 #include "AS5047P_Config.h"
 
-#define ANGLE_SCALE_FACTOR    0.021972656f  // Pre-calculate scale factor (360.0f / 16384.0f)
+#ifdef HIGH_RES
+#define ANGLE_SCALE_FACTOR    0.021973997F  // Pre-calculate scale factor (360.0f / 16383.0f)
+#else
+#define ANGLE_SCALE_FACTOR    (360.0f / 4095.0f) 
+#endif
 
 
 typedef struct {
@@ -42,5 +46,7 @@ int AS5047P_start(AS5047P_t *encd);
 float AS5047P_get_degree(AS5047P_t *encd);
 float AS5047P_get_rpm(AS5047P_t *encd, uint32_t dt_us);
 float AS5047P_get_actual_degree(AS5047P_t *encd);
+
+int AS5047P_readCommand(AS5047P_t *encd, uint8_t *cmd, uint8_t *receive_buffer);
 
 #endif /* AS5047P_DRIVER_INC_AS5047P_H_ */

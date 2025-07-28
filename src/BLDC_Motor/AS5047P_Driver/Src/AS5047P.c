@@ -9,6 +9,17 @@
 #include <string.h>
 #include <math.h>
 
+#define AS5047P_REG_ANGLE  0x3FFF
+#define AS5047P_WRITE_CMD  0x4000
+
+uint8_t calc_even_parity(uint16_t value) {
+    value ^= value >> 8;
+    value ^= value >> 4;
+    value ^= value >> 2;
+    value ^= value >> 1;
+    return value & 1;
+}
+
 
 int AS5047P_config(AS5047P_t *encd, SPI_HandleTypeDef *hspi, GPIO_TypeDef *cs_port, uint16_t cs_pin) {
     if (encd == NULL || hspi == NULL || cs_port == NULL || cs_pin == 0) {
@@ -24,11 +35,24 @@ int AS5047P_config(AS5047P_t *encd, SPI_HandleTypeDef *hspi, GPIO_TypeDef *cs_po
     return 1;
 }
 
-int AS5047P_start(AS5047P_t *encd) {
-	uint8_t data_tx[2] = {0x3f, 0xff};
+int AS5047P_readCommand(AS5047P_t *encd, uint8_t *cmd, uint8_t *receive_buffer) {
 	AS5047P_cs_reset(encd);
 
-	if (HAL_SPI_TransmitReceive_DMA(encd->AS5047P_spi, data_tx, encd->spi_rx_buffer, 2) != HAL_OK) {
+	if (HAL_SPI_TransmitReceive(encd->AS5047P_spi, cmd, receive_buffer, 2, 1000) != HAL_OK) {
+	    AS5047P_cs_set(encd);
+        return 0;
+    }
+
+    AS5047P_cs_set(encd);
+	return 1;
+}
+
+int AS5047P_start(AS5047P_t *encd) {
+    uint16_t cmd = AS5047P_WRITE_CMD | AS5047P_REG_ANGLE;
+    cmd |= (calc_even_parity(cmd) << 15);  // bit 15 parity
+
+	AS5047P_cs_reset(encd);
+	if (HAL_SPI_TransmitReceive_DMA(encd->AS5047P_spi, (uint8_t*)&cmd, encd->spi_rx_buffer, 2) != HAL_OK) {
         return 0;
     }
 
@@ -42,12 +66,22 @@ float AS5047P_get_degree(AS5047P_t *encd) {
 
     uint16_t encd_data_rx = (encd->spi_rx_buffer[0] << 8) | encd->spi_rx_buffer[1];
 
-    // Cek error flag dengan bit masking
-    if (encd_data_rx & (1 << 14)) {
+    // Check parity
+    uint8_t parity = calc_even_parity(encd_data_rx & 0x7FFF); // exclude bit 15
+    if (((encd_data_rx >> 15) & 0x1) != parity) {
         return encd->angle_filtered;  // Return filtered value if error
     }
 
+    // Cek error flag dengan bit masking
+    if ((encd_data_rx >> 14) & 1) {
+        return encd->angle_filtered;  // Return filtered value if error
+    }
+
+#ifdef HIGH_RES
     float angle_raw = (float)(encd_data_rx & 0x3FFF) * ANGLE_SCALE_FACTOR;
+#else
+    float angle_raw = (float)((encd_data_rx >> 2) & 0x0FFF) * ANGLE_SCALE_FACTOR;
+#endif
 
     float angle_diff = angle_raw - encd->prev_raw_angle;
 

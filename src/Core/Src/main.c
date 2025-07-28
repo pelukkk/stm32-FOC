@@ -255,11 +255,13 @@ int main(void)
   printf("FPU tidak aktif!\n");
 #endif
 
+  MX_USB_DEVICE_Init();
+
   init_trig_lut();
   
-  pid_init(&hfoc.id_ctrl, 0.5f, 12.0f, 0.0f, FOC_TS, 10.0f, 0.0001f);
-  pid_init(&hfoc.iq_ctrl, 0.5f, 12.0f, 0.0f, FOC_TS, 10.0f, 0.0001f);
-  pid_init(&hfoc.speed_ctrl, 0.01f, 1.0f, 0.0f, FOC_TS * SPEED_CONTROL_CYCLE, 5.0f, 0.01f);
+  pid_init(&hfoc.id_ctrl, 0.5f, 12.0f, 0.0f, FOC_TS, 15.0f, 0.0001f);
+  pid_init(&hfoc.iq_ctrl, 0.5f, 12.0f, 0.0f, FOC_TS, 15.0f, 0.0001f);
+  pid_init(&hfoc.speed_ctrl, 0.01f, 1.0f, 0.0f, FOC_TS * SPEED_CONTROL_CYCLE, 6.0f, 0.01f);
   pid_init(&hfoc.pos_ctrl, 2.0f, 0.0f, 0.08f, FOC_TS * SPEED_CONTROL_CYCLE, 3.0f, 0.1f);
 
   AS5047P_config(&hencd, &hspi1, SPI_CS_GPIO_Port, SPI_CS_Pin);
@@ -276,7 +278,7 @@ int main(void)
 
   foc_sensor_init(&hfoc, 0.0f, REVERSE_DIR); //1.8704f
   foc_gear_reducer_init(&hfoc, 1.0/19.0);
-  foc_set_limit_current(&hfoc, 5.0);
+  foc_set_limit_current(&hfoc, 10.0);
 
   HAL_TIM_Base_Start(&htim10);
 
@@ -824,7 +826,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
 void StartControlTask(void const * argument)
 {
   /* init code for USB_DEVICE */
-  MX_USB_DEVICE_Init();
+
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
   for(;;)
@@ -872,7 +874,7 @@ void StartComTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    if (HAL_GetTick() - debug_tick >= 3) {
+    if (HAL_GetTick() - debug_tick >= 5) {
       debug_tick = HAL_GetTick();
       float data[16];
       uint16_t len = 0;
@@ -882,6 +884,7 @@ void StartComTask(void const * argument)
         data[len++] = sp_input;
         data[len++] = hfoc.id;
         data[len++] = hfoc.iq;
+        data[len++] = hfoc.actual_rpm;
         
         // data[len++] = DEG_TO_RAD(hencd.angle_filtered);
         // data[len++] = hfoc.e_angle_rad;
@@ -889,13 +892,13 @@ void StartComTask(void const * argument)
         // data[len++] = hfoc.actual_rpm;
         break;
       case SPEED_CONTROL_MODE:
-        // data[len++] = sp_input;
+        data[len++] = sp_input;
         // data[len++] = hencd.angle_filtered;
-        // data[len++] = hfoc.actual_rpm;
+        data[len++] = hfoc.actual_rpm;
         // data[len++] = hfoc.iq;
-        data[len++] = hfoc.ia;
-        data[len++] = hfoc.ib;
-        data[len++] = -hfoc.ia - hfoc.ib;
+        // data[len++] = hfoc.ia;
+        // data[len++] = hfoc.ib;
+        // data[len++] = -hfoc.ia - hfoc.ib;
         break;
       case POSITION_CONTROL_MODE:
         data[len++] = sp_input;
