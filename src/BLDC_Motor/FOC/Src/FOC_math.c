@@ -26,14 +26,24 @@ void norm_angle_rad(float *theta) {
 
 float fast_sin(float theta) {
 	norm_angle_rad(&theta);
-    int index = (int)(theta / LUT_STEP) % LUT_SIZE;
-    return sin_lut[index];
+    float index_f = theta / LUT_STEP;
+    int index = (int)index_f;
+    float frac = index_f - index;
+
+    int next_index = (index + 1) % LUT_SIZE;
+
+    return sin_lut[index] * (1.0f - frac) + sin_lut[next_index] * frac;
 }
 
 float fast_cos(float theta) {
 	norm_angle_rad(&theta);
-    int index = (int)(theta / LUT_STEP) % LUT_SIZE;
-    return cos_lut[index];
+    float index_f = theta / LUT_STEP;
+    int index = (int)index_f;
+    float frac = index_f - index;
+
+    int next_index = (index + 1) % LUT_SIZE;
+
+    return cos_lut[index] * (1.0f - frac) + cos_lut[next_index] * frac;
 }
 
 void pre_calc_sin_cos(float theta, float *sin_theta, float *cos_theta) {

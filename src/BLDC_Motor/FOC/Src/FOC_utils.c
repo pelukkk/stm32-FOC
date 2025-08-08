@@ -6,6 +6,7 @@
  */
 
 #include "FOC_utils.h"
+#include "flash.h"
 #include <math.h>
 
 
@@ -83,7 +84,7 @@ void foc_current_control_update(foc_t *hfoc) {
 
     // pre calculate sin & cos
     float sin_theta, cos_theta;
-    pre_calc_sin_cos(hfoc->e_angle_rad, &sin_theta, &cos_theta);
+    pre_calc_sin_cos(hfoc->e_angle_rad_comp, &sin_theta, &cos_theta);
 
     // Get measured currents
     clarke_park_transform(hfoc->ia, hfoc->ib, sin_theta, cos_theta, &hfoc->id, &hfoc->iq);
@@ -136,18 +137,48 @@ void foc_position_control_update(foc_t *hfoc, float deg_reference) {
 #endif
 }
 
+extern _Bool sensor_is_calibrated;
+
 void foc_calc_electric_angle(foc_t *hfoc, float m_rad) {
-	if (hfoc == NULL) return;
+    // Check for NULL pointer and invalid parameters
+    if (hfoc == NULL || hfoc->pole_pairs <= 0) {
+        return;
+    }
 
-	hfoc->m_angle_rad = m_rad - hfoc->m_angle_offset;
-	float e_rad = fmodf(hfoc->m_angle_rad * hfoc->pole_pairs, TWO_PI);
+    // Normalize mechanical angle
+    hfoc->m_angle_rad = m_rad - hfoc->m_angle_offset;
+    norm_angle_rad(&hfoc->m_angle_rad);
 
-	if (hfoc->sensor_dir == REVERSE_DIR) {
-		e_rad = TWO_PI - e_rad;
-	}
+    // Calculate raw electric angle
+    float e_rad = hfoc->m_angle_rad * hfoc->pole_pairs;
+    
+    // Handle sensor direction
+    if (hfoc->sensor_dir == REVERSE_DIR) {
+        e_rad = TWO_PI - e_rad;
+    }
 
-	norm_angle_rad(&e_rad);
     hfoc->e_angle_rad = e_rad;
+
+    // Calculate LUT index with wrap-around
+    float lut_idx_f = (hfoc->m_angle_rad / TWO_PI) * ERROR_LUT_SIZE;
+    lut_idx_f = fmodf(lut_idx_f, ERROR_LUT_SIZE);
+    if (lut_idx_f < 0) {
+        lut_idx_f += ERROR_LUT_SIZE;
+    }
+
+    // Get neighboring indices with wrap-around
+    int idx0 = (int)lut_idx_f % ERROR_LUT_SIZE;
+    int idx1 = (idx0 + 1) % ERROR_LUT_SIZE;
+    float frac = lut_idx_f - (float)idx0;
+
+    // Linear interpolation
+    float encoder_error = m_config.encd_error_comp[idx0] * (1.0f - frac) + m_config.encd_error_comp[idx1] * frac;
+    e_rad += encoder_error;
+    
+    // Normalize final electric angle
+    norm_angle_rad(&e_rad);
+
+    hfoc->e_angle_rad_comp = e_rad;
 }
 
 void open_loop_voltage_control(foc_t *hfoc, float vd_ref, float vq_ref, float angle_rad) {

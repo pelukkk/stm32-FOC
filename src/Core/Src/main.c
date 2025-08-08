@@ -28,6 +28,7 @@
 #include "DRV8302.h"
 #include "FOC_utils.h"
 #include "bldc_midi.h"
+#include "flash.h"
 #include <stdio.h>
 #include <math.h>
 
@@ -47,11 +48,11 @@
 /* USER CODE BEGIN PM */
 
 #define BLDC_PWM_FREQ 10000
-#define R_SHUNT	0.01
-#define V_OFFSET_A	1.645
-#define V_OFFSET_B	1.657
+#define R_SHUNT	0.01f
+#define V_OFFSET_A	1.645f
+#define V_OFFSET_B	1.657f
 #define POLE_PAIR	(7)
-#define SPEED_CONTROL_CYCLE	5
+#define SPEED_CONTROL_CYCLE	10
 #define FOC_TS (1.0f / (float)BLDC_PWM_FREQ)
 
 /* USER CODE END PM */
@@ -79,7 +80,7 @@ AS5047P_t hencd;
 
 float angle_deg = 0.0f;
 float sp_input = 0.0f;
-float kp_adj = 0, ki_adj = 0.0, kd_adj = 0;
+int start_cal = 0;
 
 /* USER CODE END PV */
 
@@ -98,6 +99,8 @@ void StartComTask(void const * argument);
 /* USER CODE BEGIN PFP */
 
 extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
+
+void send_data_float(const float* values, uint8_t count);
 
 /* USER CODE END PFP */
 
@@ -128,7 +131,7 @@ void bldc_config(DRV8302_t *hbldc) {
 
 float get_power_voltage(void) {
 	static float pv_filtered = 0.0f;
-  const float filter_alpha = 0.5f; 
+  const float filter_alpha = 0.2f; 
 
 	// convert to volt
 	float pv = (float)ADC2->JDR1 * ADC_2_POWER_VOLT;
@@ -141,7 +144,7 @@ float get_power_voltage(void) {
 
 #define CAL_ITERATION 100
 
-#define VD_CAL 0.5f
+#define VD_CAL 0.6f
 #define VQ_CAL 0.0f
 
 void cal_encoder(void) {
@@ -155,6 +158,85 @@ void cal_encoder(void) {
   open_loop_voltage_control(&hfoc, 0.0f, 0.0f, 0.0f);
   rad_offset = rad_offset / (float)CAL_ITERATION;
   hfoc.m_angle_offset = rad_offset;
+  m_config.encd_offset = rad_offset;
+}
+
+float error_temp[ERROR_LUT_SIZE] = {0};
+_Bool sensor_is_calibrated = 0;
+
+void encoder_get_error(void) {
+  char usb_send_buff[128];
+
+  memset(error_temp, 0, sizeof(error_temp));
+
+  cal_encoder();
+
+  for (int i = 0; i < ERROR_LUT_SIZE; i++) {
+    float mech_deg = (float)i * (360.0f / (float)ERROR_LUT_SIZE);
+    float elec_rad = DEG_TO_RAD(mech_deg * POLE_PAIR);
+    open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, elec_rad);
+    HAL_Delay(5);
+
+    float mech_rad = hfoc.m_angle_rad;
+    float raw_delta = elec_rad - hfoc.e_angle_rad;
+    float delta = elec_rad - hfoc.e_angle_rad_comp;
+    
+    raw_delta -= TWO_PI * floorf((raw_delta + PI) / TWO_PI);
+    delta -= TWO_PI * floorf((delta + PI) / TWO_PI);
+    
+    // Untuk kalibrasi pertama, isi tabel error
+    float lut_pos = (mech_rad / TWO_PI) * ERROR_LUT_SIZE;
+    int index = (int)(lut_pos);
+
+    while (index < 0) {
+      index += ERROR_LUT_SIZE;
+    }
+    index %= ERROR_LUT_SIZE;
+
+    error_temp[index] = raw_delta;
+    
+    float buffer_val[2];
+    buffer_val[0] = raw_delta;
+    buffer_val[1] = delta;
+    send_data_float(buffer_val, 2);
+  }
+  
+  for (int i = 0; i < ERROR_LUT_SIZE; i++) {
+    if (error_temp[i] == 0) {
+      int last_i = i - 1;
+      int next_i = i + 1;
+      if (last_i < 0) last_i += ERROR_LUT_SIZE;
+      if (next_i > ERROR_LUT_SIZE) next_i -= ERROR_LUT_SIZE;
+      error_temp[i] = (error_temp[last_i] + error_temp[next_i]) / 2.0f;
+    }
+  }
+
+  memcpy(m_config.encd_error_comp, error_temp, sizeof(error_temp));
+
+  open_loop_voltage_control(&hfoc, 0.0f, 0.0f, 0.0f);
+}
+
+/******************************************************************************/
+
+void svpwm_test(void) {
+  char usb_send_buff[32];
+
+  open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, 0.0f);
+  HAL_Delay(500);
+
+  for (int i = 0; i < ERROR_LUT_SIZE; i++) {
+    float mech_deg = (float)i * (360.0f / (float)ERROR_LUT_SIZE);
+    float elec_deg = mech_deg * POLE_PAIR;
+    open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, DEG_TO_RAD(elec_deg));
+    HAL_Delay(3);
+    float pwm[3];
+    pwm[0] = TIM1->CCR1;
+    pwm[1] = TIM1->CCR2;
+    pwm[2] = TIM1->CCR3;
+    send_data_float(pwm, 3);
+  }
+
+  open_loop_voltage_control(&hfoc, 0.0f, 0.0f, 0.0f);
 }
 
 /******************************************************************************/
@@ -210,6 +292,7 @@ void send_data_float(const float* values, uint8_t count) {
 
 /******************************************************************************/
 
+// platformio run --target upload 
 /* USER CODE END 0 */
 
 /**
@@ -257,12 +340,14 @@ int main(void)
 
   MX_USB_DEVICE_Init();
 
+  read_config_from_flash(&m_config);
+
   init_trig_lut();
   
-  pid_init(&hfoc.id_ctrl, 0.5f, 12.0f, 0.0f, FOC_TS, 15.0f, 0.0001f);
-  pid_init(&hfoc.iq_ctrl, 0.5f, 12.0f, 0.0f, FOC_TS, 15.0f, 0.0001f);
-  pid_init(&hfoc.speed_ctrl, 0.01f, 1.0f, 0.0f, FOC_TS * SPEED_CONTROL_CYCLE, 6.0f, 0.01f);
-  pid_init(&hfoc.pos_ctrl, 2.0f, 0.0f, 0.08f, FOC_TS * SPEED_CONTROL_CYCLE, 3.0f, 0.1f);
+  pid_init(&hfoc.id_ctrl, m_config.id_kp, m_config.id_ki, 0.0f, FOC_TS, m_config.id_out_max, m_config.id_e_deadband);
+  pid_init(&hfoc.iq_ctrl, m_config.iq_kp, m_config.iq_ki, 0.0f, FOC_TS, m_config.iq_out_max, m_config.iq_e_deadband);
+  pid_init(&hfoc.speed_ctrl, m_config.speed_kp, m_config.speed_ki, 0.0f, FOC_TS * SPEED_CONTROL_CYCLE, m_config.speed_out_max, m_config.speed_e_deadband);
+  pid_init(&hfoc.pos_ctrl, m_config.pos_kp, m_config.pos_ki, m_config.pos_kd, FOC_TS * SPEED_CONTROL_CYCLE, m_config.pos_out_max, m_config.pos_e_deadband);
 
   AS5047P_config(&hencd, &hspi1, SPI_CS_GPIO_Port, SPI_CS_Pin);
   AS5047P_start(&hencd);
@@ -276,22 +361,18 @@ int main(void)
   foc_pwm_init(&hfoc, &(TIM1->CCR3), &(TIM1->CCR2), &(TIM1->CCR1), bldc.pwm_resolution);
   foc_motor_init(&hfoc, POLE_PAIR, 360);
 
-  foc_sensor_init(&hfoc, 0.0f, REVERSE_DIR); //1.8704f
+  foc_sensor_init(&hfoc, m_config.encd_offset, REVERSE_DIR); //1.8704f
   foc_gear_reducer_init(&hfoc, 1.0/19.0);
   foc_set_limit_current(&hfoc, 10.0);
 
   HAL_TIM_Base_Start(&htim10);
 
   // auto callibration misalignment mechanical angle sensor
-  hfoc.control_mode = CALIBRATION_MODE;
-  cal_encoder();
+  // hfoc.control_mode = CALIBRATION_MODE;
+  // cal_encoder();
   
   hfoc.control_mode = TORQUE_CONTROL_MODE;
 
-  //initial pid settings
-  kp_adj = hfoc.id_ctrl.kp;
-  ki_adj = hfoc.id_ctrl.ki / hfoc.id_ctrl.ts;
-  kd_adj = hfoc.id_ctrl.kd * hfoc.id_ctrl.ts;
   /* USER CODE END 2 */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -779,7 +860,6 @@ uint32_t dt_us;
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi) {
 	if (hspi->Instance == SPI1) {
     angle_deg = AS5047P_get_degree(&hencd);
-
     foc_calc_electric_angle(&hfoc, DEG_TO_RAD(angle_deg));
 	}
 }
@@ -793,21 +873,29 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
 
     AS5047P_start(&hencd);
 
-		if (hfoc.control_mode < AUDIO_MODE) {
-			foc_current_control_update(&hfoc);
+    switch(hfoc.control_mode) {
+      case TORQUE_CONTROL_MODE:
+      case SPEED_CONTROL_MODE:
+      case POSITION_CONTROL_MODE: {
+        foc_current_control_update(&hfoc);
 
-			if (event_loop_count > SPEED_CONTROL_CYCLE) {
-				event_loop_count = 0;
-        dt_us = get_dt_us();
-        hfoc.actual_rpm = AS5047P_get_rpm(&hencd, dt_us);
-				foc_set_flag();
-			}
-			event_loop_count++;
-		}
-		else if (hfoc.control_mode == AUDIO_MODE){
-      audio_loop(&hfoc, hfoc.e_angle_rad);
-			if (event_loop_count > 0) event_loop_count = 0;
-		}
+        if (event_loop_count > SPEED_CONTROL_CYCLE) {
+          event_loop_count = 0;
+          dt_us = get_dt_us();
+          hfoc.actual_rpm = AS5047P_get_rpm(&hencd, dt_us);
+          foc_set_flag();
+        }
+        event_loop_count++;
+        break;
+      }
+      case AUDIO_MODE: {
+        audio_loop(&hfoc, hfoc.e_angle_rad);
+        if (event_loop_count > 0) event_loop_count = 0;
+        break;
+      }
+      default:
+      break;
+    }
     // LED_GPIO_Port->BSRR = LED_Pin<<16;
 	}
 	if (hadc->Instance == ADC2) {
@@ -834,7 +922,6 @@ void StartControlTask(void const * argument)
     if (is_foc_ready()) {
       foc_reset_flag();
 
-      
       switch (hfoc.control_mode) {
       case TORQUE_CONTROL_MODE:
         hfoc.id_ref = 0.0f;
@@ -848,8 +935,17 @@ void StartControlTask(void const * argument)
         hfoc.actual_angle = AS5047P_get_actual_degree(&hencd);
         foc_position_control_update(&hfoc, sp_input);
         break;
+      case CALIBRATION_MODE:
+        break;
       default:
         break;
+      }
+    }
+    
+    if (hfoc.control_mode == CALIBRATION_MODE) {
+      if (start_cal == 1) {
+        encoder_get_error();
+        start_cal = 0;
       }
     }
     osDelay(1);
@@ -884,7 +980,7 @@ void StartComTask(void const * argument)
         data[len++] = sp_input;
         data[len++] = hfoc.id;
         data[len++] = hfoc.iq;
-        data[len++] = hfoc.actual_rpm;
+        data[len++] = hfoc.v_bus;
         
         // data[len++] = DEG_TO_RAD(hencd.angle_filtered);
         // data[len++] = hfoc.e_angle_rad;
@@ -895,7 +991,7 @@ void StartComTask(void const * argument)
         data[len++] = sp_input;
         // data[len++] = hencd.angle_filtered;
         data[len++] = hfoc.actual_rpm;
-        // data[len++] = hfoc.iq;
+        data[len++] = dt_us;
         // data[len++] = hfoc.ia;
         // data[len++] = hfoc.ib;
         // data[len++] = -hfoc.ia - hfoc.ib;
@@ -911,7 +1007,10 @@ void StartComTask(void const * argument)
         data[len++] = hfoc.e_angle_rad;
         break;
       }
-      send_data_float(data, len);
+
+      if (hfoc.control_mode != CALIBRATION_MODE) {
+        send_data_float(data, len);
+      }
     }
 
     if (HAL_GetTick() - blink_tick >= 500) {

@@ -19,6 +19,7 @@
 #define SQRT3_BY_TWO 0.86602540378f
 #define SQRT3 1.73205080757f
 #define TWO_PI 6.2831853f
+#define PI 3.1415926f
 
 #define CONSTRAIN(val, min, max) \
     ((val) <= (min) ? (min) : ((val) >= (max) ? (max) : (val)))

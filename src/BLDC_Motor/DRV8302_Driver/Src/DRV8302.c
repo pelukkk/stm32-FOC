@@ -46,13 +46,33 @@ void DRV8302_GPIO_ENGATE_config(DRV8302_t *cfg, GPIO_TypeDef *port, uint16_t pin
 	cfg->en_gate_pin = pin;
 }
 
+static uint32_t get_timer_clock(TIM_HandleTypeDef *htim) {
+    if (htim->Instance == TIM1 || htim->Instance == TIM8 || 
+        htim->Instance == TIM9 || htim->Instance == TIM10 || 
+        htim->Instance == TIM11) {
+        // Timer di APB2
+        uint32_t pclk = HAL_RCC_GetPCLK2Freq();
+        if ((RCC->CFGR & RCC_CFGR_PPRE2) != RCC_CFGR_PPRE2_DIV1)
+            return pclk * 2;  // Timer clock doubled if APB prescaler != 1
+        else
+            return pclk;
+    } else {
+        // Timer di APB1
+        uint32_t pclk = HAL_RCC_GetPCLK1Freq();
+        if ((RCC->CFGR & RCC_CFGR_PPRE1) != RCC_CFGR_PPRE1_DIV1)
+            return pclk * 2;
+        else
+            return pclk;
+    }
+}
+
 int DRV8302_TIMER_ADC_config(DRV8302_t *cfg, TIM_HandleTypeDef *timer, ADC_HandleTypeDef *adc, uint32_t freq) {
 	if (cfg == NULL || timer == NULL || adc == NULL) return 0;
 
 	cfg->timer = timer;
 	cfg->adc_current = adc;
 
-    const uint32_t timer_clock = 168000000;
+    const uint32_t timer_clock = get_timer_clock(timer);
 
     // prescaler dan period untuk mode center-aligned
     uint32_t prescaler = 0;
@@ -173,7 +193,7 @@ void DRV8302_get_current(DRV8302_t *cfg, float *ia, float *ib) {
     float ia_raw = (vshunt_a - cfg->v_offset_a) * cfg->v_to_current;
     float ib_raw = (vshunt_b - cfg->v_offset_b) * cfg->v_to_current;
 
-    // EMA Low Pass Filter
+    // IIR Low Pass Filter
     ia_filtered = (1.0f - CURRENT_FILTER_ALPHA) * ia_filtered + CURRENT_FILTER_ALPHA * ia_raw;
     ib_filtered = (1.0f - CURRENT_FILTER_ALPHA) * ib_filtered + CURRENT_FILTER_ALPHA * ib_raw;
 

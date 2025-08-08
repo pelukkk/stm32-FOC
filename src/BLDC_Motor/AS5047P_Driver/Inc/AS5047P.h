@@ -24,6 +24,7 @@ typedef struct {
     uint8_t spi_rx_buffer[2];
     
     float angle_filtered;
+    float prev_angle_filtered;
     float prev_raw_angle;
     uint8_t spike_counter;
     

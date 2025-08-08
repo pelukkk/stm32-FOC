@@ -12,6 +12,8 @@
 #include "FOC_math.h"
 #include "pid_utils.h"
 
+#define ERROR_LUT_SIZE (1024)
+
 #define MAG_CAL_RES (1024*2)
 #define MAG_CAL_STEP ((TWO_PI * POLE_PAIR) / (float)MAG_CAL_RES)
 
@@ -28,8 +30,8 @@ typedef enum {
 	TORQUE_CONTROL_MODE,
 	SPEED_CONTROL_MODE,
 	POSITION_CONTROL_MODE,
-	AUDIO_MODE,
 	CALIBRATION_MODE,
+	AUDIO_MODE,
 }motor_mode_t;
 
 typedef enum {
@@ -46,6 +48,7 @@ typedef struct {
 
 	float m_angle_rad; // mechanical angle
 	float e_angle_rad; // electrical angle
+	float e_angle_rad_comp; // electrical angle
 	float m_angle_offset;
 
 	float vd, vq;

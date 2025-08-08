@@ -61,57 +61,56 @@ int AS5047P_start(AS5047P_t *encd) {
 
 
 float AS5047P_get_degree(AS5047P_t *encd) {
-
     AS5047P_cs_set(encd);
 
-    uint16_t encd_data_rx = (encd->spi_rx_buffer[0] << 8) | encd->spi_rx_buffer[1];
+    const uint16_t raw_data = ((uint16_t)encd->spi_rx_buffer[0] << 8) | encd->spi_rx_buffer[1];
 
-    // Check parity
-    uint8_t parity = calc_even_parity(encd_data_rx & 0x7FFF); // exclude bit 15
-    if (((encd_data_rx >> 15) & 0x1) != parity) {
-        return encd->angle_filtered;  // Return filtered value if error
+    // Parity check (bit 15 = parity)
+    const uint16_t data_15bit = raw_data & 0x7FFF;
+    const uint8_t expected_parity = calc_even_parity(data_15bit);
+    const uint8_t received_parity = (raw_data >> 15) & 0x1;
+    if (expected_parity != received_parity) {
+        return encd->angle_filtered;
     }
 
-    // Cek error flag dengan bit masking
-    if ((encd_data_rx >> 14) & 1) {
-        return encd->angle_filtered;  // Return filtered value if error
+    // Error flag check (bit 14)
+    if ((raw_data >> 14) & 0x1) {
+        return encd->angle_filtered;
     }
 
 #ifdef HIGH_RES
-    float angle_raw = (float)(encd_data_rx & 0x3FFF) * ANGLE_SCALE_FACTOR;
+    const float angle_raw = (float)(raw_data & 0x3FFF) * ANGLE_SCALE_FACTOR;
 #else
-    float angle_raw = (float)((encd_data_rx >> 2) & 0x0FFF) * ANGLE_SCALE_FACTOR;
+    const float angle_raw = (float)((raw_data >> 2) & 0x0FFF) * ANGLE_SCALE_FACTOR;
 #endif
 
     float angle_diff = angle_raw - encd->prev_raw_angle;
-
-    angle_diff = fmodf(angle_diff + 180.0f, 360.0f) - 180.0f;
+    angle_diff -= 360.0f * floorf((angle_diff + 180.0f) / 360.0f);
 
     if (fabsf(angle_diff) > MAX_ANGLE_JUMP_DEG) {
-        encd->spike_counter++;
-
-        if (encd->spike_counter < SPIKE_REJECT_COUNT) {
-            angle_raw = encd->prev_raw_angle;
-        } else {
-            encd->spike_counter = 0;
+        if (++encd->spike_counter < SPIKE_REJECT_COUNT) {
+            return encd->angle_filtered;
         }
+        encd->spike_counter = 0;
     } else {
         encd->spike_counter = 0;
     }
 
     encd->prev_raw_angle = angle_raw;
 
-    // Filter IIR dengan optimasi wrap-around
-    float filtered_diff = fmodf(angle_raw - encd->angle_filtered + 180.0f, 360.0f) - 180.0f;
+    // Filter IIR dengan wrap-around
+    float filtered_diff = angle_raw - encd->angle_filtered;
+    filtered_diff -= 360.0f * floorf((filtered_diff + 180.0f) / 360.0f);
     encd->angle_filtered += ANGLE_FILTER_ALPHA * filtered_diff;
 
-    encd->angle_filtered = fmodf(encd->angle_filtered, 360.0f);
-    if (encd->angle_filtered < 0.0f) {
+    if (encd->angle_filtered >= 360.0f)
+        encd->angle_filtered -= 360.0f;
+    else if (encd->angle_filtered < 0.0f)
         encd->angle_filtered += 360.0f;
-    }
 
     return encd->angle_filtered;
 }
+
 
 float AS5047P_get_rpm(AS5047P_t *encd, uint32_t dt_us) {
     // Handle angle wrap-around (optimized)

@@ -28,6 +28,7 @@
 #include <ctype.h>
 #include <stdbool.h>
 #include "FOC_utils.h"
+#include "flash.h"
 /* USER CODE END INCLUDE */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -80,6 +81,8 @@
 
 /* USER CODE BEGIN PRIVATE_MACRO */
 
+#define usb_print(str)  CDC_Transmit_Blocking((uint8_t *)(str), sizeof(str) - 1)
+
 /* USER CODE END PRIVATE_MACRO */
 
 /**
@@ -116,10 +119,11 @@ extern USBD_HandleTypeDef hUsbDeviceFS;
 /* USER CODE BEGIN EXPORTED_VARIABLES */
 extern float sp_input;
 
-extern float kp_adj, ki_adj, kd_adj, actual_degree;
 extern foc_t hfoc;
 
 extern int note_piano[];
+
+extern int start_cal;
 /* USER CODE END EXPORTED_VARIABLES */
 
 /**
@@ -138,6 +142,19 @@ static int8_t CDC_Receive_FS(uint8_t* pbuf, uint32_t *Len);
 static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum);
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_DECLARATION */
+
+#define CDC_TIMEOUT_MS 100  // Timeout dalam milidetik
+
+uint8_t CDC_Transmit_Blocking(uint8_t* buf, uint16_t len) {
+    uint32_t start = HAL_GetTick();
+
+    while (CDC_Transmit_FS(buf, len) == USBD_BUSY) {
+        if ((HAL_GetTick() - start) > CDC_TIMEOUT_MS) {
+            return USBD_FAIL;  // Timeout
+        }
+    }
+    return USBD_OK;
+}
 
 int parse_float_value(const char *input, char separator, float *out_value) {
     if (!input || !out_value) return 0;
@@ -205,73 +222,35 @@ void parse_piano(uint8_t *buf) {
 	else if (buf[0] == 0xD2) note_piano[tone] = 0;
 }
 
-void get_pid_param(void) {
-  switch (hfoc.control_mode) {
-  case TORQUE_CONTROL_MODE:
-    kp_adj = hfoc.id_ctrl.kp;
-    ki_adj = hfoc.id_ctrl.ki / hfoc.id_ctrl.ts;
-    kd_adj = hfoc.id_ctrl.kd * hfoc.id_ctrl.ts;
-    break;
-  case SPEED_CONTROL_MODE:
-    kp_adj = hfoc.speed_ctrl.kp;
-    ki_adj = hfoc.speed_ctrl.ki / hfoc.speed_ctrl.ts;
-    kd_adj = hfoc.speed_ctrl.kd * hfoc.speed_ctrl.ts;
-    break;
-  case POSITION_CONTROL_MODE:
-    kp_adj = hfoc.pos_ctrl.kp;
-    ki_adj = hfoc.pos_ctrl.ki / hfoc.pos_ctrl.ts;
-    kd_adj = hfoc.pos_ctrl.kd * hfoc.pos_ctrl.ts;
-    break;
-  default:
-    break;
-  }
-}
-
-#define CDC_TIMEOUT_MS 100  // Timeout dalam milidetik
-
-uint8_t CDC_Transmit_Blocking(uint8_t* buf, uint16_t len) {
-    uint32_t start = HAL_GetTick();
-
-    while (CDC_Transmit_FS(buf, len) == USBD_BUSY) {
-        if ((HAL_GetTick() - start) > CDC_TIMEOUT_MS) {
-            return USBD_FAIL;  // Timeout
-        }
-    }
-    return USBD_OK;
-}
-
 void set_pid_param(void) {
   char write_buffer[64];
   uint16_t len = 0;
 
   switch (hfoc.control_mode) {
   case TORQUE_CONTROL_MODE:
-    pid_init(&hfoc.id_ctrl, kp_adj, ki_adj, 0.0f, hfoc.id_ctrl.ts, 12.0f, 0.0001f);
-    pid_init(&hfoc.iq_ctrl, kp_adj, ki_adj, 0.0f, hfoc.iq_ctrl.ts, 12.0f, 0.0001f);
     len = sprintf(write_buffer, "Current Control param:\n"
                                 "Kp:%f\n"
                                 "Ki:%f\n", 
-                                kp_adj, ki_adj);
+                                hfoc.id_ctrl.kp, hfoc.id_ctrl.ki);
     break;
   case SPEED_CONTROL_MODE:
-    pid_init(&hfoc.speed_ctrl, kp_adj, ki_adj, 0.0f, hfoc.speed_ctrl.ts, 10.0f, 0.01f);
     len = sprintf(write_buffer, "Speed Control param:\n"
                                 "Kp:%f\n"
                                 "Ki:%f\n", 
-                                kp_adj, ki_adj);
+                                hfoc.speed_ctrl.kp, hfoc.speed_ctrl.ki);
     break;
   case POSITION_CONTROL_MODE:
-    pid_init(&hfoc.pos_ctrl, kp_adj, ki_adj, kd_adj, hfoc.pos_ctrl.ts, 1500.0f, 0.01f);
     len = sprintf(write_buffer, "Position Control param:\n"
                                 "Kp:%f\n"
+                                "Ki:%f\n"
                                 "Kd:%f\n", 
-                                kp_adj, kd_adj);
+                                hfoc.pos_ctrl.kp, hfoc.pos_ctrl.ki, hfoc.pos_ctrl.kd);
     break;
   default:
     len = sprintf(write_buffer, "Wrong Mode\n");
     break;
   }
-  CDC_Transmit_Blocking((uint8_t*)write_buffer, len);
+  usb_print(write_buffer);
 }
 
 void print_mode(motor_mode_t mode) {
@@ -288,11 +267,14 @@ void print_mode(motor_mode_t mode) {
   case POSITION_CONTROL_MODE:
     len = sprintf(write_buffer, "Control Mode[2]: Position Control\n");
     break;
+  case CALIBRATION_MODE:
+    len = sprintf(write_buffer, "Control Mode[3]: calibration\n");
+    break;
   default:
     len = sprintf(write_buffer, "Wrong Mode\n");
     break;
   }
-  CDC_Transmit_Blocking((uint8_t*)write_buffer, len);
+  usb_print(write_buffer);
 }
 
 /* USER CODE END PRIVATE_FUNCTIONS_DECLARATION */
@@ -436,33 +418,95 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 
 	char *cmd = (char *)Buf;
 
-	if (strstr((char *)Buf, "sp")) {
-		parse_float_value((char *)Buf, '=', &sp_input);
+	if (strstr(cmd, "cal")) {
+    hfoc.control_mode = CALIBRATION_MODE;
+    start_cal = 1;
+    usb_print("start callibration\r\n");
+  }
+	else if (strstr(cmd, "sp")) {
+		parse_float_value(cmd, '=', &sp_input);
 	}
-	else if (strstr((char *)Buf, "kp")) {
-		parse_float_value((char *)Buf, '=', &kp_adj);
+	else if (strstr(cmd, "kp")) {
+    float kp;
+		parse_float_value(cmd, '=', &kp);
+
+    switch (hfoc.control_mode) {
+    case TORQUE_CONTROL_MODE:
+      hfoc.id_ctrl.kp = kp;
+      m_config.id_kp = kp;
+      hfoc.iq_ctrl.kp = kp;
+      m_config.iq_kp = kp;
+      break;
+    case SPEED_CONTROL_MODE:
+      hfoc.speed_ctrl.kp = kp;
+      m_config.speed_kp = kp;
+      break;
+    case POSITION_CONTROL_MODE:
+      hfoc.pos_ctrl.kp = kp;
+      m_config.pos_kp = kp;
+      break;
+    default:
+      break;
+    }
 		set_pid_detected = 1;
 	}
-	else if (strstr((char *)Buf, "ki")) {
-		parse_float_value((char *)Buf, '=', &ki_adj);
+	else if (strstr(cmd, "ki")) {
+    float ki;
+		parse_float_value(cmd, '=', &ki);
+    
+    switch (hfoc.control_mode) {
+    case TORQUE_CONTROL_MODE:
+      hfoc.id_ctrl.ki = ki;
+      m_config.id_ki = ki;
+      hfoc.iq_ctrl.ki = ki;
+      m_config.iq_ki = ki;
+      break;
+    case SPEED_CONTROL_MODE:
+      hfoc.speed_ctrl.ki = ki;
+      m_config.speed_ki = ki;
+      break;
+    case POSITION_CONTROL_MODE:
+      hfoc.pos_ctrl.ki = ki;
+      m_config.pos_ki = ki;
+      break;
+    default:
+      break;
+    }
 		set_pid_detected = 1;
 	}
-	else if (strstr((char *)Buf, "kd")) {
-		parse_float_value((char *)Buf, '=', &kd_adj);
+	else if (strstr(cmd, "kd")) {
+    float kd;
+		parse_float_value(cmd, '=', &kd);
+    
+    switch (hfoc.control_mode) {
+    case POSITION_CONTROL_MODE:
+      hfoc.pos_ctrl.kd = kd;
+      m_config.pos_kd = kd;
+      break;
+    default:
+      break;
+    }
 		set_pid_detected = 1;
 	}
 	else if (strstr(cmd, "mode") != NULL) {
     motor_mode_t mode = TORQUE_CONTROL_MODE;
 
-		parse_int_value(cmd, ' ', (int*)&mode);
+		parse_int_value(cmd, '=', (int*)&mode);
     print_mode(mode);
 
-    if (mode <= POSITION_CONTROL_MODE) {
+    if (mode <= CALIBRATION_MODE) {
       hfoc.control_mode = mode;
       sp_input = 0;
-      get_pid_param();
     }
 	}
+  else if (strstr(cmd, "save") != NULL) {
+    save_config_to_flash(&m_config);
+    usb_print("success save configuration\r\n");
+  }
+  else if (strstr(cmd, "set_default") != NULL) {
+    default_config(&m_config);
+    usb_print("success reset configuration\r\n");
+  }
 
 	if (set_pid_detected) {
     set_pid_param();

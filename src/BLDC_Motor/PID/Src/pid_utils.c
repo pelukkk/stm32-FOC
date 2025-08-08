@@ -14,7 +14,7 @@ float pi_control(PID_Controller_t *pi, float error) {
 
     float p_term = pi->kp * error;
 
-    float new_integral = pi->integral + error * pi->ki;
+    float new_integral = pi->integral + error * pi->ki * pi->ts;
 
     float output = p_term + new_integral;
 
@@ -51,7 +51,7 @@ float pd_control(PID_Controller_t *pd, float error) {
     pd->last_error = error;
 
     float p_term = pd->kp * error;
-    float d_term = pd->kd * derivative;
+    float d_term = pd->kd / pd->ts * derivative;
 
     float output = p_term + d_term;
 
@@ -73,10 +73,10 @@ float pid_control(PID_Controller_t *pid, float error) {
 
     float p_term = pid->kp * error;
 
-    float d_term = pid->kd * (error - pid->last_error);
+    float d_term = pid->kd / pid->ts * (error - pid->last_error);
     pid->last_error = error;
 
-    float new_integral = pid->integral + error * pid->ki;
+    float new_integral = pid->integral + error * pid->ki * pid->ts;
 
     float output = p_term + d_term + new_integral;
 
@@ -106,8 +106,8 @@ void pid_reset_integrator(PID_Controller_t *pi) {
 
 void pid_init(PID_Controller_t *pid, float kp, float ki, float kd, float Ts, float out_max, float deadband) {
 	pid->kp = kp;
-	pid->ki = ki * Ts;
-	pid->kd = kd / Ts;
+	pid->ki = ki;
+	pid->kd = kd;
     pid->ts = Ts;
     pid->integral = 0.0f;
     pid->out_max = out_max;

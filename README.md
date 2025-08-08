@@ -18,7 +18,7 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 
 ---
 
-## 🛠 Development Tools
+## Development Tools
 
 - [PlatformIO](https://platformio.org/)
 - STM32CubeMX
@@ -27,5 +27,19 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 - VS Code + Serial Monitor for debugging
 - Altium Designer (for Hardware) you can see in STM32-FOC-hardware.zip
 - ACTUATOR CONTROL APP in controller_app.zip
+
+---
+
+## UPDATE LOG
+
+9-8-2025
+- Add eccentricity calibration for magnetic encoder
+- CLI for auto calibration
+- Change PID manual tuning settings
+- Save configuration to flash memory
+- Default config
+
+29-7-2025
+- Add parity check for AS5047P
 
 ---
