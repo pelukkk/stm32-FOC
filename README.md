@@ -32,6 +32,10 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 
 ## UPDATE LOG
 
+20-8-2025
+- ADC injected simultaneous mode to read currents and DC voltage faster
+- Add command to change title, legends, and erase graph in serial plotter
+
 9-8-2025
 - Add eccentricity calibration for magnetic encoder
 - CLI for auto calibration
