@@ -29,6 +29,7 @@
 #include "FOC_utils.h"
 #include "bldc_midi.h"
 #include "flash.h"
+#include "controller_app.h"
 #include <stdio.h>
 #include <math.h>
 
@@ -60,8 +61,7 @@
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
 ADC_HandleTypeDef hadc2;
-DMA_HandleTypeDef hdma_adc1;
-DMA_HandleTypeDef hdma_adc2;
+ADC_HandleTypeDef hadc3;
 
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
@@ -81,6 +81,8 @@ AS5047P_t hencd;
 float angle_deg = 0.0f;
 float sp_input = 0.0f;
 int start_cal = 0;
+_Bool com_init_flag = 0;
+_Bool calibration_flag = 0;
 
 /* USER CODE END PV */
 
@@ -93,14 +95,11 @@ static void MX_TIM1_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM10_Init(void);
+static void MX_ADC3_Init(void);
 void StartControlTask(void const * argument);
 void StartComTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
-
-extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
-
-void send_data_float(const float* values, uint8_t count);
 
 /* USER CODE END PFP */
 
@@ -117,7 +116,7 @@ void bldc_config(DRV8302_t *hbldc) {
   DRV8302_GPIO_OCTW_config(hbldc, OCTW_GPIO_Port, OCTW_Pin);
   DRV8302_GPIO_FAULT_config(hbldc, FAULT_GPIO_Port, FAULT_Pin);
   DRV8302_GPIO_ENGATE_config(hbldc, EN_GATE_GPIO_Port, EN_GATE_Pin);
-  DRV8302_TIMER_ADC_config(hbldc, &htim1, &hadc1, BLDC_PWM_FREQ);
+  DRV8302_TIMER_config(hbldc, &htim1, BLDC_PWM_FREQ);
   DRV8302_current_sens_config(hbldc, _10VPV, R_SHUNT, V_OFFSET_A, V_OFFSET_B);
   DRV8302_set_mode(hbldc, _6_PWM_MODE, _CYCLE_MODE);
 
@@ -134,7 +133,7 @@ float get_power_voltage(void) {
   const float filter_alpha = 0.2f; 
 
 	// convert to volt
-	float pv = (float)ADC2->JDR1 * ADC_2_POWER_VOLT;
+	float pv = (float)ADC3->JDR1 * ADC_2_POWER_VOLT;
 
   // Low-pass filter for noise reduction
 	pv_filtered = (1.0f - filter_alpha) * pv_filtered + filter_alpha * pv;
@@ -142,12 +141,30 @@ float get_power_voltage(void) {
 	return pv_filtered;
 }
 
+/******************************************************************************/
+
+uint32_t get_dt_us(void) {
+#if 0
+  static uint32_t last_us = 0;
+
+  uint32_t now_us = TIM10->CNT;
+  uint32_t elapsed_us = now_us - last_us;
+  last_us = now_us;
+#else
+  uint32_t elapsed_us = TIM10->CNT;
+  TIM10->CNT = 0;
+#endif
+  return elapsed_us;
+}
+
+/******************************************************************************/
+
 #define CAL_ITERATION 100
 
 #define VD_CAL 0.6f
 #define VQ_CAL 0.0f
 
-void cal_encoder(void) {
+void cal_encoder_misalignment(void) {
   open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, 0.0f);
   HAL_Delay(500);
   float rad_offset = 0.0f;
@@ -162,14 +179,11 @@ void cal_encoder(void) {
 }
 
 float error_temp[ERROR_LUT_SIZE] = {0};
-_Bool sensor_is_calibrated = 0;
 
 void encoder_get_error(void) {
-  char usb_send_buff[128];
-
   memset(error_temp, 0, sizeof(error_temp));
 
-  cal_encoder();
+  cal_encoder_misalignment();
 
   for (int i = 0; i < ERROR_LUT_SIZE; i++) {
     float mech_deg = (float)i * (360.0f / (float)ERROR_LUT_SIZE);
@@ -184,7 +198,6 @@ void encoder_get_error(void) {
     raw_delta -= TWO_PI * floorf((raw_delta + PI) / TWO_PI);
     delta -= TWO_PI * floorf((delta + PI) / TWO_PI);
     
-    // Untuk kalibrasi pertama, isi tabel error
     float lut_pos = (mech_rad / TWO_PI) * ERROR_LUT_SIZE;
     int index = (int)(lut_pos);
 
@@ -195,10 +208,12 @@ void encoder_get_error(void) {
 
     error_temp[index] = raw_delta;
     
+    // debug
     float buffer_val[2];
-    buffer_val[0] = raw_delta;
-    buffer_val[1] = delta;
-    send_data_float(buffer_val, 2);
+    // buffer_val[0] = raw_delta;
+    // buffer_val[1] = delta;
+    buffer_val[0] = delta;
+    send_data_float(buffer_val, 1);
   }
   
   for (int i = 0; i < ERROR_LUT_SIZE; i++) {
@@ -219,21 +234,25 @@ void encoder_get_error(void) {
 /******************************************************************************/
 
 void svpwm_test(void) {
-  char usb_send_buff[32];
-
   open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, 0.0f);
   HAL_Delay(500);
 
   for (int i = 0; i < ERROR_LUT_SIZE; i++) {
     float mech_deg = (float)i * (360.0f / (float)ERROR_LUT_SIZE);
-    float elec_deg = mech_deg * POLE_PAIR;
-    open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, DEG_TO_RAD(elec_deg));
-    HAL_Delay(3);
-    float pwm[3];
-    pwm[0] = TIM1->CCR1;
-    pwm[1] = TIM1->CCR2;
-    pwm[2] = TIM1->CCR3;
-    send_data_float(pwm, 3);
+    float elec_rad = DEG_TO_RAD(mech_deg * POLE_PAIR);
+    open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, elec_rad);
+    HAL_Delay(10);
+    // float pwm[3];
+    // pwm[0] = TIM1->CCR1;
+    // pwm[1] = TIM1->CCR2;
+    // pwm[2] = TIM1->CCR3;
+    // send_data_float(pwm, 3);
+    float rad[2];
+    rad[0] = hfoc.e_angle_rad_comp;
+    rad[1] = elec_rad;
+    norm_angle_rad(&rad[0]);
+    norm_angle_rad(&rad[1]);
+    send_data_float(rad, 2);
   }
 
   open_loop_voltage_control(&hfoc, 0.0f, 0.0f, 0.0f);
@@ -241,58 +260,8 @@ void svpwm_test(void) {
 
 /******************************************************************************/
 
-uint32_t get_dt_us(void) {
-#if 0
-  static uint32_t last_us = 0;
-
-  // Get current time (μs)
-  uint32_t now_us = TIM10->CNT;
-  uint32_t elapsed_us = now_us - last_us;
-  last_us = now_us;
-#else
-  // Get current time (μs)
-  uint32_t elapsed_us = TIM10->CNT;
-  TIM10->CNT = 0;
-#endif
-  return elapsed_us;
-}
-
-/******************************************************************************/
-
-void send_data_float(const float* values, uint8_t count) {
-  if (count == 0 || values == NULL) return;
-
-  // Total frame: 2 byte header + 4*count float + 2 byte footer
-  uint16_t total_size = 2 + count * 4 + 2;
-  uint8_t frame[256];  // pastikan cukup besar
-
-  if (total_size > sizeof(frame)) return;  // prevent overflow
-
-  // Header: 0x55, 0xAA
-  frame[0] = 0x55;
-  frame[1] = 0xAA;
-
-  // Copy floats
-  for (uint8_t i = 0; i < count; i++) {
-    union { float f; uint8_t b[4]; } u;
-    u.f = values[i];
-    frame[2 + i * 4 + 0] = u.b[0];
-    frame[2 + i * 4 + 1] = u.b[1];
-    frame[2 + i * 4 + 2] = u.b[2];
-    frame[2 + i * 4 + 3] = u.b[3];
-  }
-
-  // Footer: 0xAA, 0x55
-  frame[2 + count * 4 + 0] = 0xAA;
-  frame[2 + count * 4 + 1] = 0x55;
-
-  // Transmit
-  CDC_Transmit_FS(frame, total_size);
-}
-
-/******************************************************************************/
-
 // platformio run --target upload 
+// platformio run --target clean
 /* USER CODE END 0 */
 
 /**
@@ -330,6 +299,7 @@ int main(void)
   MX_ADC2_Init();
   MX_SPI1_Init();
   MX_TIM10_Init();
+  MX_ADC3_Init();
   /* USER CODE BEGIN 2 */
 
 #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
@@ -355,8 +325,11 @@ int main(void)
   AS5047P_start(&hencd);
 
   bldc_config(&bldc);
-	// voltage sensor
+	// current sensor
+	HAL_ADCEx_InjectedStart_IT(&hadc1);
 	HAL_ADCEx_InjectedStart_IT(&hadc2);
+	// voltage sensor
+	HAL_ADCEx_InjectedStart_IT(&hadc3);
 
   foc_pwm_init(&hfoc, &(TIM1->CCR3), &(TIM1->CCR2), &(TIM1->CCR1), bldc.pwm_resolution);
   foc_motor_init(&hfoc, POLE_PAIR, 360);
@@ -367,10 +340,6 @@ int main(void)
 
   HAL_TIM_Base_Start(&htim10);
 
-  // auto callibration misalignment mechanical angle sensor
-  // hfoc.control_mode = CALIBRATION_MODE;
-  // cal_encoder();
-  
   hfoc.control_mode = TORQUE_CONTROL_MODE;
 
   /* USER CODE END 2 */
@@ -477,6 +446,7 @@ static void MX_ADC1_Init(void)
 
   /* USER CODE END ADC1_Init 0 */
 
+  ADC_MultiModeTypeDef multimode = {0};
   ADC_ChannelConfTypeDef sConfig = {0};
   ADC_InjectionConfTypeDef sConfigInjected = {0};
 
@@ -496,9 +466,18 @@ static void MX_ADC1_Init(void)
   hadc1.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T1_CC1;
   hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc1.Init.NbrOfConversion = 1;
-  hadc1.Init.DMAContinuousRequests = ENABLE;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure the ADC multi-mode
+  */
+  multimode.Mode = ADC_TRIPLEMODE_INJECSIMULT;
+  multimode.TwoSamplingDelay = ADC_TWOSAMPLINGDELAY_5CYCLES;
+  if (HAL_ADCEx_MultiModeConfigChannel(&hadc1, &multimode) != HAL_OK)
   {
     Error_Handler();
   }
@@ -517,22 +496,13 @@ static void MX_ADC1_Init(void)
   */
   sConfigInjected.InjectedChannel = ADC_CHANNEL_8;
   sConfigInjected.InjectedRank = 1;
-  sConfigInjected.InjectedNbrOfConversion = 2;
+  sConfigInjected.InjectedNbrOfConversion = 1;
   sConfigInjected.InjectedSamplingTime = ADC_SAMPLETIME_15CYCLES;
   sConfigInjected.ExternalTrigInjecConvEdge = ADC_EXTERNALTRIGINJECCONVEDGE_FALLING;
   sConfigInjected.ExternalTrigInjecConv = ADC_EXTERNALTRIGINJECCONV_T1_CC4;
-  sConfigInjected.AutoInjectedConv = ENABLE;
+  sConfigInjected.AutoInjectedConv = DISABLE;
   sConfigInjected.InjectedDiscontinuousConvMode = DISABLE;
   sConfigInjected.InjectedOffset = 0;
-  if (HAL_ADCEx_InjectedConfigChannel(&hadc1, &sConfigInjected) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Configures for the selected ADC injected channel its corresponding rank in the sequencer and its sample time
-  */
-  sConfigInjected.InjectedChannel = ADC_CHANNEL_9;
-  sConfigInjected.InjectedRank = 2;
   if (HAL_ADCEx_InjectedConfigChannel(&hadc1, &sConfigInjected) != HAL_OK)
   {
     Error_Handler();
@@ -568,10 +538,8 @@ static void MX_ADC2_Init(void)
   hadc2.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
   hadc2.Init.Resolution = ADC_RESOLUTION_12B;
   hadc2.Init.ScanConvMode = ENABLE;
-  hadc2.Init.ContinuousConvMode = ENABLE;
+  hadc2.Init.ContinuousConvMode = DISABLE;
   hadc2.Init.DiscontinuousConvMode = DISABLE;
-  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
   hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc2.Init.NbrOfConversion = 1;
   hadc2.Init.DMAContinuousRequests = DISABLE;
@@ -583,10 +551,75 @@ static void MX_ADC2_Init(void)
 
   /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
   */
-  sConfig.Channel = ADC_CHANNEL_3;
+  sConfig.Channel = ADC_CHANNEL_9;
   sConfig.Rank = 1;
   sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
   if (HAL_ADC_ConfigChannel(&hadc2, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configures for the selected ADC injected channel its corresponding rank in the sequencer and its sample time
+  */
+  sConfigInjected.InjectedChannel = ADC_CHANNEL_9;
+  sConfigInjected.InjectedRank = 1;
+  sConfigInjected.InjectedNbrOfConversion = 1;
+  sConfigInjected.InjectedSamplingTime = ADC_SAMPLETIME_15CYCLES;
+  sConfigInjected.AutoInjectedConv = ENABLE;
+  sConfigInjected.InjectedDiscontinuousConvMode = DISABLE;
+  sConfigInjected.InjectedOffset = 0;
+  if (HAL_ADCEx_InjectedConfigChannel(&hadc2, &sConfigInjected) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC2_Init 2 */
+
+  /* USER CODE END ADC2_Init 2 */
+
+}
+
+/**
+  * @brief ADC3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC3_Init(void)
+{
+
+  /* USER CODE BEGIN ADC3_Init 0 */
+
+  /* USER CODE END ADC3_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+  ADC_InjectionConfTypeDef sConfigInjected = {0};
+
+  /* USER CODE BEGIN ADC3_Init 1 */
+
+  /* USER CODE END ADC3_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc3.Instance = ADC3;
+  hadc3.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc3.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc3.Init.ScanConvMode = ENABLE;
+  hadc3.Init.ContinuousConvMode = DISABLE;
+  hadc3.Init.DiscontinuousConvMode = DISABLE;
+  hadc3.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc3.Init.NbrOfConversion = 1;
+  hadc3.Init.DMAContinuousRequests = DISABLE;
+  hadc3.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_3;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_3CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc3, &sConfig) != HAL_OK)
   {
     Error_Handler();
   }
@@ -597,18 +630,16 @@ static void MX_ADC2_Init(void)
   sConfigInjected.InjectedRank = 1;
   sConfigInjected.InjectedNbrOfConversion = 1;
   sConfigInjected.InjectedSamplingTime = ADC_SAMPLETIME_15CYCLES;
-  sConfigInjected.ExternalTrigInjecConvEdge = ADC_EXTERNALTRIGINJECCONVEDGE_FALLING;
-  sConfigInjected.ExternalTrigInjecConv = ADC_EXTERNALTRIGINJECCONV_T1_CC4;
-  sConfigInjected.AutoInjectedConv = DISABLE;
+  sConfigInjected.AutoInjectedConv = ENABLE;
   sConfigInjected.InjectedDiscontinuousConvMode = DISABLE;
   sConfigInjected.InjectedOffset = 0;
-  if (HAL_ADCEx_InjectedConfigChannel(&hadc2, &sConfigInjected) != HAL_OK)
+  if (HAL_ADCEx_InjectedConfigChannel(&hadc3, &sConfigInjected) != HAL_OK)
   {
     Error_Handler();
   }
-  /* USER CODE BEGIN ADC2_Init 2 */
+  /* USER CODE BEGIN ADC3_Init 2 */
 
-  /* USER CODE END ADC2_Init 2 */
+  /* USER CODE END ADC3_Init 2 */
 
 }
 
@@ -781,15 +812,9 @@ static void MX_DMA_Init(void)
   /* DMA2_Stream0_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
-  /* DMA2_Stream2_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream2_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream2_IRQn);
   /* DMA2_Stream3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 7, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream3_IRQn);
-  /* DMA2_Stream4_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream4_IRQn, 5, 0);
-  HAL_NVIC_EnableIRQ(DMA2_Stream4_IRQn);
 
 }
 
@@ -866,8 +891,18 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi) {
 
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
 	if (hadc->Instance == ADC1) {
+    LED_GPIO_Port->BSRR = LED_Pin;
+    DRV8302_set_adc_a(&bldc, ADC1->JDR1);
+    LED_GPIO_Port->BSRR = LED_Pin<<16;
+  }
+	if (hadc->Instance == ADC2) {
+    DRV8302_set_adc_b(&bldc, ADC2->JDR1);
+  }
+	if (hadc->Instance == ADC3) {
+    LED_GPIO_Port->BSRR = LED_Pin;
+    hfoc.v_bus = get_power_voltage();
+
     static uint8_t event_loop_count = 0;
-    // LED_GPIO_Port->BSRR = LED_Pin;
 
 		DRV8302_get_current(&bldc, &hfoc.ia, &hfoc.ib);
 
@@ -896,10 +931,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
       default:
       break;
     }
-    // LED_GPIO_Port->BSRR = LED_Pin<<16;
-	}
-	if (hadc->Instance == ADC2) {
-    hfoc.v_bus = get_power_voltage();
+    LED_GPIO_Port->BSRR = LED_Pin<<16;
 	}
 }
 /* USER CODE END 4 */
@@ -914,7 +946,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
 void StartControlTask(void const * argument)
 {
   /* init code for USB_DEVICE */
-
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
   for(;;)
@@ -945,6 +977,7 @@ void StartControlTask(void const * argument)
     if (hfoc.control_mode == CALIBRATION_MODE) {
       if (start_cal == 1) {
         encoder_get_error();
+        // svpwm_test();
         start_cal = 0;
       }
     }
@@ -967,6 +1000,8 @@ void StartComTask(void const * argument)
   uint32_t debug_tick = HAL_GetTick();
   uint32_t blink_tick = HAL_GetTick();
 
+  motor_mode_t last_mode = CALIBRATION_MODE;
+
   /* Infinite loop */
   for(;;)
   {
@@ -978,23 +1013,12 @@ void StartComTask(void const * argument)
       switch (hfoc.control_mode) {
       case TORQUE_CONTROL_MODE:
         data[len++] = sp_input;
-        data[len++] = hfoc.id;
-        data[len++] = hfoc.iq;
-        data[len++] = hfoc.v_bus;
-        
-        // data[len++] = DEG_TO_RAD(hencd.angle_filtered);
-        // data[len++] = hfoc.e_angle_rad;
-
-        // data[len++] = hfoc.actual_rpm;
+        data[len++] = hfoc.id_filtered;
+        data[len++] = hfoc.iq_filtered;
         break;
       case SPEED_CONTROL_MODE:
         data[len++] = sp_input;
-        // data[len++] = hencd.angle_filtered;
         data[len++] = hfoc.actual_rpm;
-        data[len++] = dt_us;
-        // data[len++] = hfoc.ia;
-        // data[len++] = hfoc.ib;
-        // data[len++] = -hfoc.ia - hfoc.ib;
         break;
       case POSITION_CONTROL_MODE:
         data[len++] = sp_input;
@@ -1004,12 +1028,61 @@ void StartComTask(void const * argument)
       case AUDIO_MODE:
         break;
       case CALIBRATION_MODE:
-        data[len++] = hfoc.e_angle_rad;
+        data[len++] = hencd.prev_raw_angle;
+        data[len++] = hencd.angle_filtered;
         break;
       }
 
       if (hfoc.control_mode != CALIBRATION_MODE) {
         send_data_float(data, len);
+      }
+    }
+
+    if (com_init_flag) {
+      last_mode = -1;
+      com_init_flag = 0;
+    }
+
+    if (calibration_flag) {
+      last_mode = -1;
+      calibration_flag = 0;
+    }
+
+    if (hfoc.control_mode != last_mode) {
+      last_mode = hfoc.control_mode;
+      float data[16];
+
+      osDelay(2);
+      erase_graph(); osDelay(1);
+      switch (hfoc.control_mode) {
+      case TORQUE_CONTROL_MODE:
+        send_data_float(data, 3); osDelay(1);
+        change_title("CURRENT CONTROL MODE"); osDelay(1);
+        change_legend(0, "Iq_sp"); osDelay(1);
+        change_legend(1, "Id"); osDelay(1);
+        change_legend(2, "Iq"); osDelay(1);
+        break;
+      case SPEED_CONTROL_MODE:
+        send_data_float(data, 3); osDelay(1);
+        change_title("SPEED CONTROL MODE"); osDelay(1);
+        change_legend(0, "set point"); osDelay(1);
+        change_legend(1, "rpm"); osDelay(1);
+        break;
+      case POSITION_CONTROL_MODE:
+        send_data_float(data, 3); osDelay(1);
+        change_title("POSITION CONTROL MODE"); osDelay(1);
+        change_legend(0, "set point"); osDelay(1);
+        change_legend(1, "actual angle"); osDelay(1);
+        change_legend(2, "iq"); osDelay(1);
+        break;
+      case CALIBRATION_MODE:
+        send_data_float(data, 1); osDelay(1);
+        change_title("CALIBRATION MODE"); osDelay(1);
+        change_legend(0, "error angle (rad)"); osDelay(1);
+        start_cal = 1;
+        break;
+      default:
+        break;
       }
     }
 

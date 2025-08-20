@@ -17,9 +17,6 @@
 #define MAG_CAL_RES (1024*2)
 #define MAG_CAL_STEP ((TWO_PI * POLE_PAIR) / (float)MAG_CAL_RES)
 
-#define VD_CAL 0.5f
-#define VQ_CAL 0.0f
-
 #define is_foc_ready() (foc_ready)
 #define foc_reset_flag() (foc_ready = 0)
 #define foc_set_flag() (foc_ready = 1)
@@ -53,6 +50,7 @@ typedef struct {
 
 	float vd, vq;
 	float id, iq;
+	float id_filtered, iq_filtered;
 	float va, vb, vc;
 	float ia, ib, ic;
 	float v_bus;

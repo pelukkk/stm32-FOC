@@ -81,7 +81,7 @@
 
 /* USER CODE BEGIN PRIVATE_MACRO */
 
-#define usb_print(str)  CDC_Transmit_Blocking((uint8_t *)(str), sizeof(str) - 1)
+#define usb_print(str)  CDC_Transmit_FS((uint8_t *)(str), sizeof(str) - 1)
 
 /* USER CODE END PRIVATE_MACRO */
 
@@ -124,6 +124,8 @@ extern foc_t hfoc;
 extern int note_piano[];
 
 extern int start_cal;
+extern _Bool com_init_flag;
+extern _Bool calibration_flag;
 /* USER CODE END EXPORTED_VARIABLES */
 
 /**
@@ -146,14 +148,14 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum);
 #define CDC_TIMEOUT_MS 100  // Timeout dalam milidetik
 
 uint8_t CDC_Transmit_Blocking(uint8_t* buf, uint16_t len) {
-    uint32_t start = HAL_GetTick();
+  uint32_t start = HAL_GetTick();
 
-    while (CDC_Transmit_FS(buf, len) == USBD_BUSY) {
-        if ((HAL_GetTick() - start) > CDC_TIMEOUT_MS) {
-            return USBD_FAIL;  // Timeout
-        }
+  while (CDC_Transmit_FS(buf, len) == USBD_BUSY) {
+    if ((HAL_GetTick() - start) > CDC_TIMEOUT_MS) {
+      return USBD_FAIL;  // Timeout
     }
-    return USBD_OK;
+  }
+  return USBD_OK;
 }
 
 int parse_float_value(const char *input, char separator, float *out_value) {
@@ -250,7 +252,7 @@ void set_pid_param(void) {
     len = sprintf(write_buffer, "Wrong Mode\n");
     break;
   }
-  usb_print(write_buffer);
+  CDC_Transmit_FS((uint8_t*)write_buffer, len);
 }
 
 void print_mode(motor_mode_t mode) {
@@ -274,7 +276,7 @@ void print_mode(motor_mode_t mode) {
     len = sprintf(write_buffer, "Wrong Mode\n");
     break;
   }
-  usb_print(write_buffer);
+  CDC_Transmit_FS((uint8_t*)write_buffer, len);
 }
 
 /* USER CODE END PRIVATE_FUNCTIONS_DECLARATION */
@@ -418,10 +420,15 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 
 	char *cmd = (char *)Buf;
 
+  // init flag
+  if (Buf[0] == 0x01 && Buf[1] == 0xAA) {
+    com_init_flag = 1;
+  }
+
 	if (strstr(cmd, "cal")) {
-    hfoc.control_mode = CALIBRATION_MODE;
-    start_cal = 1;
     usb_print("start callibration\r\n");
+    hfoc.control_mode = CALIBRATION_MODE;
+    calibration_flag = 1;
   }
 	else if (strstr(cmd, "sp")) {
 		parse_float_value(cmd, '=', &sp_input);

@@ -66,11 +66,10 @@ static uint32_t get_timer_clock(TIM_HandleTypeDef *htim) {
     }
 }
 
-int DRV8302_TIMER_ADC_config(DRV8302_t *cfg, TIM_HandleTypeDef *timer, ADC_HandleTypeDef *adc, uint32_t freq) {
-	if (cfg == NULL || timer == NULL || adc == NULL) return 0;
+int DRV8302_TIMER_config(DRV8302_t *cfg, TIM_HandleTypeDef *timer, uint32_t freq) {
+	if (cfg == NULL || timer == NULL) return 0;
 
 	cfg->timer = timer;
-	cfg->adc_current = adc;
 
     const uint32_t timer_clock = get_timer_clock(timer);
 
@@ -150,7 +149,7 @@ int DRV8302_current_sens_config(DRV8302_t *cfg, CSA_gain_t gain, float R_shunt, 
 }
 
 int DRV8302_init(DRV8302_t *cfg) {
-	if (cfg == NULL || cfg->timer == NULL || cfg->adc_current == NULL) return 0;
+	if (cfg == NULL || cfg->timer == NULL) return 0;
 
 #if USE_MPWM_EXTPIN
 	HAL_GPIO_WritePin(cfg->mpwm_port, cfg->mpwm_pin, (cfg->pwm_mode == _3_PWM_MODE)? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -163,9 +162,6 @@ int DRV8302_init(DRV8302_t *cfg) {
 #endif
 
 	DRV8302_start_pwm(cfg);
-
-	// Current sensor
-	HAL_ADCEx_InjectedStart_IT(cfg->adc_current);
 
 	return 1;
 }
@@ -181,13 +177,9 @@ void DRV8302_get_current(DRV8302_t *cfg, float *ia, float *ib) {
     static float ia_filtered = 0.0f;
     static float ib_filtered = 0.0f;
 
-    // Read ADC and convert to voltage
-    __disable_irq();
-    uint32_t adc_a = cfg->adc_current->Instance->JDR1;
-    uint32_t adc_b = cfg->adc_current->Instance->JDR2;
-    __enable_irq();
-    const float vshunt_a = (float)adc_a * ADC_2_VOLT;
-    const float vshunt_b = (float)adc_b * ADC_2_VOLT;
+    // Convert to voltage
+    const float vshunt_a = (float)cfg->adc_a * ADC_2_VOLT;
+    const float vshunt_b = (float)cfg->adc_b * ADC_2_VOLT;
 
     // Compute raw phase currents (with shunt resistor gain and polarity)
     float ia_raw = (vshunt_a - cfg->v_offset_a) * cfg->v_to_current;

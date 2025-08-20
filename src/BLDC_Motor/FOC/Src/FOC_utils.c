@@ -89,6 +89,11 @@ void foc_current_control_update(foc_t *hfoc) {
     // Get measured currents
     clarke_park_transform(hfoc->ia, hfoc->ib, sin_theta, cos_theta, &hfoc->id, &hfoc->iq);
 
+    // LPF id & iq
+    const float alpha_i_filt = 0.1f;
+    hfoc->id_filtered = (1.0f - alpha_i_filt) * hfoc->id_filtered + alpha_i_filt * hfoc->id;
+    hfoc->iq_filtered = (1.0f - alpha_i_filt) * hfoc->iq_filtered + alpha_i_filt * hfoc->iq;
+
     // Continue normal FOC
     float vd_ref = pi_control(&hfoc->id_ctrl, id_ref - hfoc->id);
     float vq_ref = pi_control(&hfoc->iq_ctrl, iq_ref - hfoc->iq);
