@@ -255,6 +255,40 @@ void set_pid_param(void) {
   CDC_Transmit_FS((uint8_t*)write_buffer, len);
 }
 
+void get_pid_param(void) {
+  char write_buffer[128];
+  uint16_t len = 0;
+
+  switch (hfoc.control_mode) {
+  case TORQUE_CONTROL_MODE:
+    len = sprintf(write_buffer, "Current Control param:\n"
+                                "Kp:%f\n"
+                                "Ki:%f\n"
+                                "Max output:%f\n", 
+                                hfoc.id_ctrl.kp, hfoc.id_ctrl.ki, hfoc.id_ctrl.out_max);
+    break;
+  case SPEED_CONTROL_MODE:
+    len = sprintf(write_buffer, "Speed Control param:\n"
+                                "Kp:%f\n"
+                                "Ki:%f\n"
+                                "Max output:%f\n",
+                                hfoc.speed_ctrl.kp, hfoc.speed_ctrl.ki, hfoc.speed_ctrl.out_max);
+    break;
+  case POSITION_CONTROL_MODE:
+    len = sprintf(write_buffer, "Position Control param:\n"
+                                "Kp:%f\n"
+                                "Ki:%f\n"
+                                "Kd:%f\n"
+                                "Max output:%f\n", 
+                                hfoc.pos_ctrl.kp, hfoc.pos_ctrl.ki, hfoc.pos_ctrl.kd, hfoc.pos_ctrl.out_max);
+    break;
+  default:
+    len = sprintf(write_buffer, "Wrong Mode\n");
+    break;
+  }
+  CDC_Transmit_FS((uint8_t*)write_buffer, len);
+}
+
 void print_mode(motor_mode_t mode) {
   char write_buffer[64];
   uint16_t len = 0;
@@ -270,7 +304,10 @@ void print_mode(motor_mode_t mode) {
     len = sprintf(write_buffer, "Control Mode[2]: Position Control\n");
     break;
   case CALIBRATION_MODE:
-    len = sprintf(write_buffer, "Control Mode[3]: calibration\n");
+    len = sprintf(write_buffer, "Control Mode[3]: Calibration\n");
+    break;
+  case AUDIO_MODE:
+    len = sprintf(write_buffer, "Control Mode[4]: Audio\n");
     break;
   default:
     len = sprintf(write_buffer, "Wrong Mode\n");
@@ -501,7 +538,7 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
 		parse_int_value(cmd, '=', (int*)&mode);
     print_mode(mode);
 
-    if (mode <= CALIBRATION_MODE) {
+    if (mode <= AUDIO_MODE) {
       hfoc.control_mode = mode;
       sp_input = 0;
     }
@@ -513,6 +550,9 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
   else if (strstr(cmd, "set_default") != NULL) {
     default_config(&m_config);
     usb_print("success reset configuration\r\n");
+  }
+  else if (strstr(cmd, "get_param") != NULL) {
+    get_pid_param();
   }
 
 	if (set_pid_detected) {

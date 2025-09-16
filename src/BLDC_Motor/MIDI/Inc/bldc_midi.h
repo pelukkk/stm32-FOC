@@ -4,11 +4,12 @@
 #include <stdint.h>
 #include "FOC_utils.h"
 
-#define MAX_NOTES 3
-#define SAMPLE_RATE 10000
-#define MAX_TONE_PIANO 21
+#define MAX_NOTES 7
+#define AUDIO_SAMPLE_RATE 10000
+#define MAX_TONE_PIANO 62
 
+extern float v_tone;
 
-void audio_loop(foc_t *hfoc, float e_theta_rad);
+void audio_loop(foc_t *hfoc);
 
 #endif

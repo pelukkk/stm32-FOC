@@ -2,6 +2,7 @@
     "files.associations": {
         "math.h": "c",
         "arm_math.h": "c",
-        "limits": "c"
+        "limits": "c",
+        "type_traits": "c"
     }
 }

@@ -29,6 +29,7 @@ typedef enum {
 	POSITION_CONTROL_MODE,
 	CALIBRATION_MODE,
 	AUDIO_MODE,
+	TEST_MODE,
 }motor_mode_t;
 
 typedef enum {

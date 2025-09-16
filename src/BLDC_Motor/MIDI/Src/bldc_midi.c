@@ -2,7 +2,6 @@
 #include "bldc_midi.h"
 #include "math.h"
 
-int note_piano[MAX_TONE_PIANO];
 // Pre-calculated frequency table for all MIDI notes (0-127)
 static const float MIDI_NOTE_FREQ[128] = {
     8.175798f,    8.661957f,    9.177024f,    9.722718f,    10.300861f,   10.913382f,   11.562325f,   12.249857f,
@@ -23,6 +22,13 @@ static const float MIDI_NOTE_FREQ[128] = {
     8372.017578f, 8869.843750f, 9397.272461f, 9956.063477f, 10548.081787f,11175.303406f,11839.821533f,12543.854004f
 };
 
+int note_piano[MAX_TONE_PIANO];
+_Bool tone_state[MAX_TONE_PIANO];
+float tone_amp[MAX_TONE_PIANO];
+uint32_t decay_tick[MAX_TONE_PIANO];
+
+float v_tone;
+
 static float note_freq(int note_number) {
     // Clamp the note number to valid MIDI range (0-127)
     if (note_number < 0) return MIDI_NOTE_FREQ[0];
@@ -30,48 +36,73 @@ static float note_freq(int note_number) {
     return MIDI_NOTE_FREQ[note_number];
 }
 
-void audio_loop(foc_t *hfoc, float e_theta_rad) {
+void audio_loop(foc_t *hfoc) {
     static uint32_t sample_count = 0;
-    const float dt = 1.0f / SAMPLE_RATE;
+    const float dt = 1.0f / AUDIO_SAMPLE_RATE;
+    const uint32_t decay_time = 1500;
+
     float t = sample_count * dt;
 
     // Find all active notes (up to MAX_NOTES)
     float active_freqs[MAX_NOTES] = {0};
+    float active_amp[MAX_NOTES] = {0};
     int active_count = 0;
 
-    for (int i = 0; i < MAX_TONE_PIANO && active_count < MAX_NOTES; i++) {
+    for (int i = MAX_TONE_PIANO-1; i >= 0 && active_count < MAX_NOTES; i--) {
+#if 0
         if (note_piano[i] == 1) {
-            active_freqs[active_count++] = note_freq(60 + i); // MIDI note: C4 = 60
+            decay_tick[i] = HAL_GetTick();
+        }
+#else
+        if (note_piano[i] == 1) {
+            if (!tone_state[i]) {
+                tone_state[i] = 1;
+                decay_tick[i] = HAL_GetTick();
+            }
+        }
+        else {
+            if (tone_state[i]) {
+                tone_state[i] = 0;
+            }
+        }
+#endif
+        if (HAL_GetTick() - decay_tick[i] < decay_time) {
+            active_amp[active_count] = (float)(decay_time - (HAL_GetTick() - decay_tick[i])) / (float)decay_time;
+            active_freqs[active_count] = note_freq(60 + i - 12*0); // MIDI note: C4 = 60
+            active_count++;
         }
     }
 
-    float vq_ref = 0;
+    float vq_ref = 0, vd_ref = 0;
 
     if (active_count == 0) {
+    	vd_ref = 0;
     	vq_ref = 0;
     } else {
         // Calculate each note's phase and sum them
         float sum = 0.0f;
 
         for (int i = 0; i < active_count; i++) {
-#if 0
+#if 1
             // Use phase accumulation for better frequency stability
             float phase = fmodf(TWO_PI * active_freqs[i] * t, TWO_PI);
-            sum += sinf(phase);
+            sum += fast_sin(phase) * active_amp[i];
 #else
 
             // sawtooth wave
-            sum += fmodf(active_freqs[i] * t, 1.0f) * 2.0f - 1.0f;
+            sum += (fmodf(active_freqs[i] * t, 1.0f) * 2.0f - 1.0f) * active_amp[i];
 #endif
         }
 
-        vq_ref = sum;
+    	vq_ref = 0.0f;
+        vd_ref = sum*2.0f;
     }
 
-    open_loop_voltage_control(hfoc, 0.0f, vq_ref+0.1, e_theta_rad);
+    v_tone = vd_ref;
+    open_loop_voltage_control(hfoc, vd_ref, vq_ref, 0);//hfoc->e_angle_rad_comp
 
     sample_count++;
-    if (sample_count >= (1000 * SAMPLE_RATE)) {
+    if (sample_count >= (1000 * AUDIO_SAMPLE_RATE)) {
         sample_count = 0;
     }
 }

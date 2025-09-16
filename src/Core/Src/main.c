@@ -48,7 +48,8 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
-#define BLDC_PWM_FREQ 10000
+#define BLDC_PWM_FREQ AUDIO_SAMPLE_RATE
+// #define BLDC_PWM_FREQ 10000
 #define R_SHUNT	0.01f
 #define V_OFFSET_A	1.645f
 #define V_OFFSET_B	1.657f
@@ -340,7 +341,11 @@ int main(void)
 
   HAL_TIM_Base_Start(&htim10);
 
-  hfoc.control_mode = TORQUE_CONTROL_MODE;
+  hfoc.control_mode = TEST_MODE;
+  // hfoc.control_mode = TORQUE_CONTROL_MODE;
+  // hfoc.control_mode = AUDIO_MODE;
+
+  // kp=4.5 kd=0.3
 
   /* USER CODE END 2 */
 
@@ -891,27 +896,22 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi) {
 
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
 	if (hadc->Instance == ADC1) {
-    LED_GPIO_Port->BSRR = LED_Pin;
     DRV8302_set_adc_a(&bldc, ADC1->JDR1);
-    LED_GPIO_Port->BSRR = LED_Pin<<16;
   }
 	if (hadc->Instance == ADC2) {
     DRV8302_set_adc_b(&bldc, ADC2->JDR1);
   }
 	if (hadc->Instance == ADC3) {
-    LED_GPIO_Port->BSRR = LED_Pin;
-    hfoc.v_bus = get_power_voltage();
-
     static uint8_t event_loop_count = 0;
 
-		DRV8302_get_current(&bldc, &hfoc.ia, &hfoc.ib);
-
+    hfoc.v_bus = get_power_voltage();
     AS5047P_start(&hencd);
-
+    
     switch(hfoc.control_mode) {
       case TORQUE_CONTROL_MODE:
       case SPEED_CONTROL_MODE:
       case POSITION_CONTROL_MODE: {
+        DRV8302_get_current(&bldc, &hfoc.ia, &hfoc.ib);
         foc_current_control_update(&hfoc);
 
         if (event_loop_count > SPEED_CONTROL_CYCLE) {
@@ -924,14 +924,12 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
         break;
       }
       case AUDIO_MODE: {
-        audio_loop(&hfoc, hfoc.e_angle_rad);
-        if (event_loop_count > 0) event_loop_count = 0;
+        audio_loop(&hfoc);
         break;
       }
       default:
       break;
     }
-    LED_GPIO_Port->BSRR = LED_Pin<<16;
 	}
 }
 /* USER CODE END 4 */
@@ -969,6 +967,9 @@ void StartControlTask(void const * argument)
         break;
       case CALIBRATION_MODE:
         break;
+      case TEST_MODE:
+        open_loop_voltage_control(&hfoc, 0.0f, 0.1f, 0.0f);
+        break;
       default:
         break;
       }
@@ -1005,7 +1006,7 @@ void StartComTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    if (HAL_GetTick() - debug_tick >= 5) {
+    if (HAL_GetTick() - debug_tick >= 1) {
       debug_tick = HAL_GetTick();
       float data[16];
       uint16_t len = 0;
@@ -1023,9 +1024,10 @@ void StartComTask(void const * argument)
       case POSITION_CONTROL_MODE:
         data[len++] = sp_input;
         data[len++] = hfoc.actual_angle;
-        data[len++] = hfoc.iq;
+        // data[len++] = hfoc.iq;
         break;
       case AUDIO_MODE:
+        data[len++] = v_tone;
         break;
       case CALIBRATION_MODE:
         data[len++] = hencd.prev_raw_angle;
@@ -1033,9 +1035,7 @@ void StartComTask(void const * argument)
         break;
       }
 
-      if (hfoc.control_mode != CALIBRATION_MODE) {
-        send_data_float(data, len);
-      }
+      send_data_float(data, len);
     }
 
     if (com_init_flag) {
@@ -1063,22 +1063,28 @@ void StartComTask(void const * argument)
         change_legend(2, "Iq"); osDelay(1);
         break;
       case SPEED_CONTROL_MODE:
-        send_data_float(data, 3); osDelay(1);
+        send_data_float(data, 2); osDelay(1);
         change_title("SPEED CONTROL MODE"); osDelay(1);
         change_legend(0, "set point"); osDelay(1);
         change_legend(1, "rpm"); osDelay(1);
         break;
       case POSITION_CONTROL_MODE:
-        send_data_float(data, 3); osDelay(1);
+        send_data_float(data, 2); osDelay(1);
         change_title("POSITION CONTROL MODE"); osDelay(1);
         change_legend(0, "set point"); osDelay(1);
         change_legend(1, "actual angle"); osDelay(1);
-        change_legend(2, "iq"); osDelay(1);
+        // change_legend(2, "iq"); osDelay(1);
         break;
       case CALIBRATION_MODE:
         send_data_float(data, 1); osDelay(1);
         change_title("CALIBRATION MODE"); osDelay(1);
         change_legend(0, "error angle (rad)"); osDelay(1);
+        start_cal = 1;
+        break;
+      case AUDIO_MODE:
+        send_data_float(data, 1); osDelay(1);
+        change_title("AUDIO MODE"); osDelay(1);
+        change_legend(0, "vd"); osDelay(1);
         start_cal = 1;
         break;
       default:

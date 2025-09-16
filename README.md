@@ -32,6 +32,9 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 
 ## UPDATE LOG
 
+16-9-2025
+- Update audio mode
+
 20-8-2025
 - ADC injected simultaneous mode to read currents and DC voltage faster
 - Add command to change title, legends, and erase graph in serial plotter

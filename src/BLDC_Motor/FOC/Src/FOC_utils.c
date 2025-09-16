@@ -194,7 +194,7 @@ void open_loop_voltage_control(foc_t *hfoc, float vd_ref, float vq_ref, float an
     float sin_theta, cos_theta;
     pre_calc_sin_cos(angle_rad, &sin_theta, &cos_theta);
     inverse_park_transform(vd_ref, vq_ref, sin_theta, cos_theta, &valpha, &vbeta);
-    svpwm(valpha, vbeta, 12.0, pwm_res, &da, &db, &dc);
+    svpwm(valpha, vbeta, hfoc->v_bus, pwm_res, &da, &db, &dc);
 
     *(hfoc->pwm_a) = CONSTRAIN(da, 0, pwm_res);
     *(hfoc->pwm_b) = CONSTRAIN(db, 0, pwm_res);
