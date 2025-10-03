@@ -48,8 +48,8 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
-#define BLDC_PWM_FREQ AUDIO_SAMPLE_RATE
-// #define BLDC_PWM_FREQ 10000
+// #define BLDC_PWM_FREQ AUDIO_SAMPLE_RATE
+#define BLDC_PWM_FREQ 10000
 #define R_SHUNT	0.01f
 #define V_OFFSET_A	1.645f
 #define V_OFFSET_B	1.657f
@@ -57,12 +57,17 @@
 #define SPEED_CONTROL_CYCLE	10
 #define FOC_TS (1.0f / (float)BLDC_PWM_FREQ)
 
+#define RECEIVER_ID 0x02
+#define TRANSMITTER_ID 0x01
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 ADC_HandleTypeDef hadc1;
 ADC_HandleTypeDef hadc2;
 ADC_HandleTypeDef hadc3;
+
+CAN_HandleTypeDef hcan1;
 
 SPI_HandleTypeDef hspi1;
 DMA_HandleTypeDef hdma_spi1_rx;
@@ -85,6 +90,10 @@ int start_cal = 0;
 _Bool com_init_flag = 0;
 _Bool calibration_flag = 0;
 
+float test_angle_sp = 0.0f;
+
+float raw_encd_data;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -97,6 +106,7 @@ static void MX_ADC2_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_TIM10_Init(void);
 static void MX_ADC3_Init(void);
+static void MX_CAN1_Init(void);
 void StartControlTask(void const * argument);
 void StartComTask(void const * argument);
 
@@ -233,30 +243,77 @@ void encoder_get_error(void) {
 }
 
 /******************************************************************************/
+float elec_rad_test = 0.0f;
 
 void svpwm_test(void) {
-  open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, 0.0f);
-  HAL_Delay(500);
+  open_loop_voltage_control(&hfoc, 0.0f, 0.3f, elec_rad_test);
+  elec_rad_test += 0.01;
+  if (elec_rad_test > TWO_PI) elec_rad_test = 0.0f;
+}
 
-  for (int i = 0; i < ERROR_LUT_SIZE; i++) {
-    float mech_deg = (float)i * (360.0f / (float)ERROR_LUT_SIZE);
-    float elec_rad = DEG_TO_RAD(mech_deg * POLE_PAIR);
-    open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, elec_rad);
-    HAL_Delay(10);
-    // float pwm[3];
-    // pwm[0] = TIM1->CCR1;
-    // pwm[1] = TIM1->CCR2;
-    // pwm[2] = TIM1->CCR3;
-    // send_data_float(pwm, 3);
-    float rad[2];
-    rad[0] = hfoc.e_angle_rad_comp;
-    rad[1] = elec_rad;
-    norm_angle_rad(&rad[0]);
-    norm_angle_rad(&rad[1]);
-    send_data_float(rad, 2);
+/******************************************************************************/
+
+
+// Filter
+void CAN_FilterConfig(void)
+{
+  CAN_FilterTypeDef filter;
+  filter.FilterBank = 0;
+  filter.FilterMode = CAN_FILTERMODE_IDMASK;
+  filter.FilterScale = CAN_FILTERSCALE_32BIT;
+  filter.FilterIdHigh = 0x0000;
+  filter.FilterIdLow = 0x0000;
+  filter.FilterMaskIdHigh = 0x0000;
+  filter.FilterMaskIdLow = 0x0000;
+  filter.FilterFIFOAssignment = CAN_RX_FIFO0;
+  filter.FilterActivation = CAN_FILTER_ENABLE;
+  filter.SlaveStartFilterBank = 14;
+  HAL_CAN_ConfigFilter(&hcan1, &filter);
+}
+
+// Transmit
+void CAN_Send(uint32_t id, uint8_t *data, uint8_t len)
+{
+  CAN_TxHeaderTypeDef TxHeader;
+  uint32_t TxMailbox;
+
+  TxHeader.DLC = len;
+  TxHeader.StdId = id;
+  TxHeader.IDE = CAN_ID_STD;
+  TxHeader.RTR = CAN_RTR_DATA;
+
+  if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) > 0) {
+    if (HAL_CAN_AddTxMessage(&hcan1, &TxHeader, data, &TxMailbox) != HAL_OK) {
+      // Error handling
+    }
   }
+}
 
-  open_loop_voltage_control(&hfoc, 0.0f, 0.0f, 0.0f);
+/******************************************************************************/
+
+// Receive (Motor 2)
+void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
+{
+  CAN_RxHeaderTypeDef RxHeader;
+  uint8_t RxData[8];
+
+  if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
+    if (RxData[0] == 0xAA && RxData[1] == 0x55) {
+      LED_GPIO_Port->BSRR = LED_Pin<<16;
+    }
+    else if (RxData[0] == 0x55 && RxData[1] == 0xAA) {
+      LED_GPIO_Port->BSRR = LED_Pin;
+    }
+    else if (RxData[0] == 0x30) {
+      union { float f; uint8_t b[4]; } u;
+      u.b[0] = RxData[1];
+      u.b[1] = RxData[2];
+      u.b[2] = RxData[3];
+      u.b[3] = RxData[4];
+
+      test_angle_sp = u.f;
+    }
+  }
 }
 
 /******************************************************************************/
@@ -301,15 +358,16 @@ int main(void)
   MX_SPI1_Init();
   MX_TIM10_Init();
   MX_ADC3_Init();
+  MX_CAN1_Init();
   /* USER CODE BEGIN 2 */
+
+  MX_USB_DEVICE_Init();
 
 #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
   printf("FPU aktif!\n");
 #else
   printf("FPU tidak aktif!\n");
 #endif
-
-  MX_USB_DEVICE_Init();
 
   read_config_from_flash(&m_config);
 
@@ -319,6 +377,10 @@ int main(void)
   pid_init(&hfoc.iq_ctrl, m_config.iq_kp, m_config.iq_ki, 0.0f, FOC_TS, m_config.iq_out_max, m_config.iq_e_deadband);
   pid_init(&hfoc.speed_ctrl, m_config.speed_kp, m_config.speed_ki, 0.0f, FOC_TS * SPEED_CONTROL_CYCLE, m_config.speed_out_max, m_config.speed_e_deadband);
   pid_init(&hfoc.pos_ctrl, m_config.pos_kp, m_config.pos_ki, m_config.pos_kd, FOC_TS * SPEED_CONTROL_CYCLE, m_config.pos_out_max, m_config.pos_e_deadband);
+
+  CAN_FilterConfig();
+	HAL_CAN_Start(&hcan1);
+	HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
 
   AS5047P_config(&hencd, &hspi1, SPI_CS_GPIO_Port, SPI_CS_Pin);
   AS5047P_start(&hencd);
@@ -336,16 +398,44 @@ int main(void)
   foc_motor_init(&hfoc, POLE_PAIR, 360);
 
   foc_sensor_init(&hfoc, m_config.encd_offset, REVERSE_DIR); //1.8704f
-  foc_gear_reducer_init(&hfoc, 1.0/19.0);
+  foc_gear_reducer_init(&hfoc, 1.0f);
   foc_set_limit_current(&hfoc, 10.0);
 
   HAL_TIM_Base_Start(&htim10);
 
-  hfoc.control_mode = TEST_MODE;
+  hfoc.control_mode = POSITION_CONTROL_MODE;
+  // encoder_get_error();
   // hfoc.control_mode = TORQUE_CONTROL_MODE;
   // hfoc.control_mode = AUDIO_MODE;
 
   // kp=4.5 kd=0.3
+
+  for (int i = 0; i < 5; i++) {
+    LED_GPIO_Port->BSRR = LED_Pin;
+    HAL_Delay(50);
+    LED_GPIO_Port->BSRR = LED_Pin<<16;
+    HAL_Delay(50);
+  }
+
+  // Blink Test
+  // Transmit (Motor 1)
+  #if 0
+  while(1) {
+    uint8_t can_tx_buff[2];
+    
+    can_tx_buff[0] = 0xAA;
+    can_tx_buff[1] = 0x55;
+    CAN_Send(TRANSMITTER_ID, can_tx_buff, 2);
+    LED_GPIO_Port->BSRR = LED_Pin<<16;
+    HAL_Delay(500);
+    
+    can_tx_buff[0] = 0x55;
+    can_tx_buff[1] = 0xAA;
+    CAN_Send(TRANSMITTER_ID, can_tx_buff, 2);
+    LED_GPIO_Port->BSRR = LED_Pin;
+    HAL_Delay(500);
+  }
+  #endif
 
   /* USER CODE END 2 */
 
@@ -367,11 +457,11 @@ int main(void)
 
   /* Create the thread(s) */
   /* definition and creation of controlTask */
-  osThreadDef(controlTask, StartControlTask, osPriorityAboveNormal, 0, 256);
+  osThreadDef(controlTask, StartControlTask, osPriorityHigh, 0, 512);
   controlTaskHandle = osThreadCreate(osThread(controlTask), NULL);
 
   /* definition and creation of comTask */
-  osThreadDef(comTask, StartComTask, osPriorityLow, 0, 256);
+  osThreadDef(comTask, StartComTask, osPriorityLow, 0, 512);
   comTaskHandle = osThreadCreate(osThread(comTask), NULL);
 
   /* USER CODE BEGIN RTOS_THREADS */
@@ -415,7 +505,11 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+#if (HSE_VALUE == 16000000U)
+  RCC_OscInitStruct.PLL.PLLM = 8;
+#else
   RCC_OscInitStruct.PLL.PLLM = 6;
+#endif
   RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 7;
@@ -649,6 +743,43 @@ static void MX_ADC3_Init(void)
 }
 
 /**
+  * @brief CAN1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_CAN1_Init(void)
+{
+
+  /* USER CODE BEGIN CAN1_Init 0 */
+
+  /* USER CODE END CAN1_Init 0 */
+
+  /* USER CODE BEGIN CAN1_Init 1 */
+
+  /* USER CODE END CAN1_Init 1 */
+  hcan1.Instance = CAN1;
+  hcan1.Init.Prescaler = 15;
+  hcan1.Init.Mode = CAN_MODE_NORMAL;
+  hcan1.Init.SyncJumpWidth = CAN_SJW_2TQ;
+  hcan1.Init.TimeSeg1 = CAN_BS1_2TQ;
+  hcan1.Init.TimeSeg2 = CAN_BS2_3TQ;
+  hcan1.Init.TimeTriggeredMode = DISABLE;
+  hcan1.Init.AutoBusOff = DISABLE;
+  hcan1.Init.AutoWakeUp = DISABLE;
+  hcan1.Init.AutoRetransmission = ENABLE;
+  hcan1.Init.ReceiveFifoLocked = DISABLE;
+  hcan1.Init.TransmitFifoPriority = DISABLE;
+  if (HAL_CAN_Init(&hcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN CAN1_Init 2 */
+
+  /* USER CODE END CAN1_Init 2 */
+
+}
+
+/**
   * @brief SPI1 Initialization Function
   * @param None
   * @retval None
@@ -671,7 +802,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_2EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_4;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -815,7 +946,7 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 0);
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 1);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
   /* DMA2_Stream3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 7, 0);
@@ -891,6 +1022,9 @@ void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi) {
 	if (hspi->Instance == SPI1) {
     angle_deg = AS5047P_get_degree(&hencd);
     foc_calc_electric_angle(&hfoc, DEG_TO_RAD(angle_deg));
+    AS5047P_set_val_flag();
+
+    // HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
 	}
 }
 
@@ -904,8 +1038,12 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
 	if (hadc->Instance == ADC3) {
     static uint8_t event_loop_count = 0;
 
+    if (AS5047P_get_val_flag()) {
+      AS5047P_reset_val_flag();
+      AS5047P_start(&hencd);
+    }
+
     hfoc.v_bus = get_power_voltage();
-    AS5047P_start(&hencd);
     
     switch(hfoc.control_mode) {
       case TORQUE_CONTROL_MODE:
@@ -927,6 +1065,9 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
         audio_loop(&hfoc);
         break;
       }
+      case TEST_MODE: {
+        break;
+      }
       default:
       break;
     }
@@ -944,7 +1085,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
 void StartControlTask(void const * argument)
 {
   /* init code for USB_DEVICE */
-  MX_USB_DEVICE_Init();
+  // MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
   for(;;)
@@ -962,13 +1103,10 @@ void StartControlTask(void const * argument)
         break;
       }
       case POSITION_CONTROL_MODE:
-        hfoc.actual_angle = AS5047P_get_actual_degree(&hencd);
-        foc_position_control_update(&hfoc, sp_input);
+        hfoc.actual_angle = AS5047P_get_actual_degree(&hencd) * hfoc.gear_ratio;
+        foc_position_control_update(&hfoc, test_angle_sp);
         break;
       case CALIBRATION_MODE:
-        break;
-      case TEST_MODE:
-        open_loop_voltage_control(&hfoc, 0.0f, 0.1f, 0.0f);
         break;
       default:
         break;
@@ -978,7 +1116,6 @@ void StartControlTask(void const * argument)
     if (hfoc.control_mode == CALIBRATION_MODE) {
       if (start_cal == 1) {
         encoder_get_error();
-        // svpwm_test();
         start_cal = 0;
       }
     }
@@ -999,30 +1136,33 @@ void StartComTask(void const * argument)
   /* USER CODE BEGIN StartComTask */
 
   uint32_t debug_tick = HAL_GetTick();
-  uint32_t blink_tick = HAL_GetTick();
+  uint32_t transmit_tick = HAL_GetTick();
 
   motor_mode_t last_mode = CALIBRATION_MODE;
 
   /* Infinite loop */
   for(;;)
   {
-    if (HAL_GetTick() - debug_tick >= 1) {
+    if (HAL_GetTick() - debug_tick >= 50) {
       debug_tick = HAL_GetTick();
       float data[16];
       uint16_t len = 0;
 
       switch (hfoc.control_mode) {
       case TORQUE_CONTROL_MODE:
-        data[len++] = sp_input;
-        data[len++] = hfoc.id_filtered;
-        data[len++] = hfoc.iq_filtered;
+        // data[len++] = sp_input;
+        data[len++] = hfoc.e_angle_rad_comp;
+        // data[len++] = hfoc.id_filtered;
+        // data[len++] = hfoc.iq_filtered;
+        data[len++] = hfoc.ia;
+        data[len++] = hfoc.ib;
         break;
       case SPEED_CONTROL_MODE:
         data[len++] = sp_input;
         data[len++] = hfoc.actual_rpm;
         break;
       case POSITION_CONTROL_MODE:
-        data[len++] = sp_input;
+        data[len++] = test_angle_sp;//sp_input;
         data[len++] = hfoc.actual_angle;
         // data[len++] = hfoc.iq;
         break;
@@ -1032,6 +1172,12 @@ void StartComTask(void const * argument)
       case CALIBRATION_MODE:
         data[len++] = hencd.prev_raw_angle;
         data[len++] = hencd.angle_filtered;
+        break;
+      case TEST_MODE:
+        // data[len++] = hfoc.v_bus;
+        data[len++] = hfoc.ia;
+        data[len++] = hfoc.ib;
+        data[len++] = hfoc.actual_angle;
         break;
       }
 
@@ -1073,7 +1219,6 @@ void StartComTask(void const * argument)
         change_title("POSITION CONTROL MODE"); osDelay(1);
         change_legend(0, "set point"); osDelay(1);
         change_legend(1, "actual angle"); osDelay(1);
-        // change_legend(2, "iq"); osDelay(1);
         break;
       case CALIBRATION_MODE:
         send_data_float(data, 1); osDelay(1);
@@ -1087,14 +1232,29 @@ void StartComTask(void const * argument)
         change_legend(0, "vd"); osDelay(1);
         start_cal = 1;
         break;
+      case TEST_MODE:
+        send_data_float(data, 3); osDelay(1);
+        change_title("TEST MODE"); osDelay(1);
+        change_legend(0, "Ia"); osDelay(1);
+        change_legend(1, "Ib"); osDelay(1);
+        change_legend(1, "angle"); osDelay(1);
+        break;
       default:
         break;
       }
     }
 
-    if (HAL_GetTick() - blink_tick >= 500) {
-      blink_tick = HAL_GetTick();
-      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
+    if (HAL_GetTick() - transmit_tick >= 10) {
+      transmit_tick = HAL_GetTick();
+      uint8_t can_tx_buff[5];
+      union { float f; uint8_t b[4]; } u;
+      u.f = hfoc.actual_angle;
+      can_tx_buff[0] = 0x30;
+      can_tx_buff[1] = u.b[0];
+      can_tx_buff[2] = u.b[1];
+      can_tx_buff[3] = u.b[2];
+      can_tx_buff[4] = u.b[3];
+      CAN_Send(TRANSMITTER_ID, can_tx_buff, 5);
     }
     osDelay(1);
   }

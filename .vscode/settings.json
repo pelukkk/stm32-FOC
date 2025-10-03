@@ -3,6 +3,10 @@
         "math.h": "c",
         "arm_math.h": "c",
         "limits": "c",
-        "type_traits": "c"
+        "type_traits": "c",
+        "stm32f4xx_hal_can.h": "c",
+        "stm32f4xx_hal_flash.h": "c",
+        "stm32f4xx_hal_tim.h": "c",
+        "stm32f4xx_hal_pcd.h": "c"
     }
 }

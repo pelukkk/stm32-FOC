@@ -12,6 +12,8 @@
 #define AS5047P_REG_ANGLE  0x3FFF
 #define AS5047P_WRITE_CMD  0x4000
 
+_Bool encd_get_val_flag = 0;
+
 uint8_t calc_even_parity(uint16_t value) {
     value ^= value >> 8;
     value ^= value >> 4;
@@ -174,7 +176,7 @@ float AS5047P_get_actual_degree(AS5047P_t *encd) {
 	else if (angle_dif> 180) {
 		encd->output_angle_ovf--;
 	}
-	float out_deg = (m_current_angle + encd->output_angle_ovf * 360.0) * GEAR_RATIO;
+	float out_deg = (m_current_angle + encd->output_angle_ovf * 360.0 + ACTUAL_ANGLE_OFFSET);
     encd->output_angle_filtered = (1.0f - ACTUAL_ANGLE_FILTER_ALPHA) * encd->output_angle_filtered + ACTUAL_ANGLE_FILTER_ALPHA * out_deg;
 	encd->output_prev_angle = m_current_angle;
 

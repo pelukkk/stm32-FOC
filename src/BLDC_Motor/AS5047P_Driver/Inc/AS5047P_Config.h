@@ -23,7 +23,9 @@
 #define DEGREES_PER_REV       360.0f     // For 1:1 gear ratio
 #define MICROS_TO_MINUTES     6e7f       // Conversion factor (μs to minutes)
 
-#define GEAR_RATIO 0.0526315789f
-#define ACTUAL_ANGLE_FILTER_ALPHA 0.984187f
+#define GEAR_RATIO 1.0f //0.0526315789f
+#define ACTUAL_ANGLE_OFFSET 60.0f
+// #define ACTUAL_ANGLE_OFFSET (-75.0f)
+#define ACTUAL_ANGLE_FILTER_ALPHA 0.71539f
 
 #endif /* AS5047P_DRIVER_AS5047P_CONFIG_H_ */

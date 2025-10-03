@@ -31,6 +31,10 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 ---
 
 ## UPDATE LOG
+6-10-2025
+- CAN bus
+- Haptic control demo
+- Setting Error Deadband and Max out PID Controler using CLI
 
 16-9-2025
 - Update audio mode

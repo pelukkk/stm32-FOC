@@ -225,28 +225,34 @@ void parse_piano(uint8_t *buf) {
 }
 
 void set_pid_param(void) {
-  char write_buffer[64];
+  char write_buffer[128];
   uint16_t len = 0;
 
   switch (hfoc.control_mode) {
   case TORQUE_CONTROL_MODE:
     len = sprintf(write_buffer, "Current Control param:\n"
                                 "Kp:%f\n"
-                                "Ki:%f\n", 
-                                hfoc.id_ctrl.kp, hfoc.id_ctrl.ki);
+                                "Ki:%f\n"
+                                "Deadband:%f\n"
+                                "Max output:%f\n", 
+                                hfoc.id_ctrl.kp, hfoc.id_ctrl.ki, hfoc.id_ctrl.e_deadband, hfoc.id_ctrl.out_max);
     break;
   case SPEED_CONTROL_MODE:
     len = sprintf(write_buffer, "Speed Control param:\n"
                                 "Kp:%f\n"
-                                "Ki:%f\n", 
-                                hfoc.speed_ctrl.kp, hfoc.speed_ctrl.ki);
+                                "Ki:%f\n"
+                                "Deadband:%f\n"
+                                "Max output:%f\n",
+                                hfoc.speed_ctrl.kp, hfoc.speed_ctrl.ki, hfoc.speed_ctrl.e_deadband, hfoc.speed_ctrl.out_max);
     break;
   case POSITION_CONTROL_MODE:
     len = sprintf(write_buffer, "Position Control param:\n"
                                 "Kp:%f\n"
                                 "Ki:%f\n"
-                                "Kd:%f\n", 
-                                hfoc.pos_ctrl.kp, hfoc.pos_ctrl.ki, hfoc.pos_ctrl.kd);
+                                "Kd:%f\n"
+                                "Deadband:%f\n"
+                                "Max output:%f\n", 
+                                hfoc.pos_ctrl.kp, hfoc.pos_ctrl.ki, hfoc.pos_ctrl.kd, hfoc.pos_ctrl.e_deadband, hfoc.pos_ctrl.out_max);
     break;
   default:
     len = sprintf(write_buffer, "Wrong Mode\n");
@@ -264,23 +270,26 @@ void get_pid_param(void) {
     len = sprintf(write_buffer, "Current Control param:\n"
                                 "Kp:%f\n"
                                 "Ki:%f\n"
+                                "Deadband:%f\n"
                                 "Max output:%f\n", 
-                                hfoc.id_ctrl.kp, hfoc.id_ctrl.ki, hfoc.id_ctrl.out_max);
+                                hfoc.id_ctrl.kp, hfoc.id_ctrl.ki, hfoc.id_ctrl.e_deadband, hfoc.id_ctrl.out_max);
     break;
   case SPEED_CONTROL_MODE:
     len = sprintf(write_buffer, "Speed Control param:\n"
                                 "Kp:%f\n"
                                 "Ki:%f\n"
+                                "Deadband:%f\n"
                                 "Max output:%f\n",
-                                hfoc.speed_ctrl.kp, hfoc.speed_ctrl.ki, hfoc.speed_ctrl.out_max);
+                                hfoc.speed_ctrl.kp, hfoc.speed_ctrl.ki, hfoc.speed_ctrl.e_deadband, hfoc.speed_ctrl.out_max);
     break;
   case POSITION_CONTROL_MODE:
     len = sprintf(write_buffer, "Position Control param:\n"
                                 "Kp:%f\n"
                                 "Ki:%f\n"
                                 "Kd:%f\n"
+                                "Deadband:%f\n"
                                 "Max output:%f\n", 
-                                hfoc.pos_ctrl.kp, hfoc.pos_ctrl.ki, hfoc.pos_ctrl.kd, hfoc.pos_ctrl.out_max);
+                                hfoc.pos_ctrl.kp, hfoc.pos_ctrl.ki, hfoc.pos_ctrl.kd, hfoc.pos_ctrl.e_deadband, hfoc.pos_ctrl.out_max);
     break;
   default:
     len = sprintf(write_buffer, "Wrong Mode\n");
@@ -532,6 +541,54 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
     }
 		set_pid_detected = 1;
 	}
+  else if (strstr(cmd, "deadband")) {
+    float db;
+		parse_float_value(cmd, '=', &db);
+    
+    switch (hfoc.control_mode) {
+    case TORQUE_CONTROL_MODE:
+      hfoc.id_ctrl.e_deadband = db;
+      m_config.id_e_deadband = db;
+      hfoc.iq_ctrl.e_deadband = db;
+      m_config.iq_e_deadband = db;
+      break;
+    case SPEED_CONTROL_MODE:
+      hfoc.speed_ctrl.e_deadband = db;
+      m_config.speed_e_deadband = db;
+      break;
+    case POSITION_CONTROL_MODE:
+      hfoc.pos_ctrl.e_deadband = db;
+      m_config.pos_e_deadband = db;
+      break;
+    default:
+      break;
+    }
+		set_pid_detected = 1;
+  }
+  else if (strstr(cmd, "max")) {
+    float max;
+		parse_float_value(cmd, '=', &max);
+    
+    switch (hfoc.control_mode) {
+    case TORQUE_CONTROL_MODE:
+      hfoc.id_ctrl.out_max = max;
+      m_config.id_out_max = max;
+      hfoc.iq_ctrl.out_max = max;
+      m_config.iq_out_max = max;
+      break;
+    case SPEED_CONTROL_MODE:
+      hfoc.speed_ctrl.out_max = max;
+      m_config.speed_out_max = max;
+      break;
+    case POSITION_CONTROL_MODE:
+      hfoc.pos_ctrl.out_max = max;
+      m_config.pos_out_max = max;
+      break;
+    default:
+      break;
+    }
+		set_pid_detected = 1;
+  }
 	else if (strstr(cmd, "mode") != NULL) {
     motor_mode_t mode = TORQUE_CONTROL_MODE;
 
@@ -543,6 +600,14 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
       sp_input = 0;
     }
 	}
+  else if (strstr(cmd, "ratio") != NULL) {
+    float ratio;
+		parse_float_value(cmd, '=', &ratio);
+    hfoc.gear_ratio = ratio;
+  }
+  else if (strstr(cmd, "set_zero") != NULL) {
+    usb_print("success set zero offset\r\n");
+  }
   else if (strstr(cmd, "save") != NULL) {
     save_config_to_flash(&m_config);
     usb_print("success save configuration\r\n");

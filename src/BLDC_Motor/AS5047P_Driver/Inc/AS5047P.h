@@ -42,6 +42,13 @@ typedef struct {
 #define AS5047P_cs_set(encd) ((encd)->AS5047P_cs_port->BSRR = (encd)->AS5047P_cs_pin)
 #define AS5047P_cs_reset(encd) ((encd)->AS5047P_cs_port->BSRR = (encd)->AS5047P_cs_pin<<16)
 
+#define AS5047P_get_val_flag() (encd_get_val_flag == 1)
+#define AS5047P_set_val_flag() (encd_get_val_flag = 1)
+#define AS5047P_reset_val_flag() (encd_get_val_flag = 0)
+
+
+extern _Bool encd_get_val_flag;
+
 int AS5047P_config(AS5047P_t *encd, SPI_HandleTypeDef *hspi, GPIO_TypeDef *cs_port, uint16_t cs_pin);
 int AS5047P_start(AS5047P_t *encd);
 float AS5047P_get_degree(AS5047P_t *encd);
