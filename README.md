@@ -31,6 +31,13 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 ---
 
 ## UPDATE LOG
+15-10-2025
+- self commissioning, auto calculate Motor Resistance and Inductance (Rs, Ld, and Lq)
+- Auto Calculate PI Gain Current Control loop using R, L, and Bandwidth
+- Setting bandwidth using CLI
+  set_bandwidth=(bandwidth in Hz)
+- move custom library code to lib folder
+
 6-10-2025
 - CAN bus
 - Haptic control demo

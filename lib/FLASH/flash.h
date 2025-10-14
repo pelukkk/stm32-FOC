@@ -24,11 +24,11 @@ typedef struct {
     float id_ki;
     float id_out_max;
     float id_e_deadband;
-    
     float iq_kp;
     float iq_ki;
     float iq_out_max;
     float iq_e_deadband;
+	float I_ctrl_bandwidth;
     
     float speed_kp;
     float speed_ki;
@@ -59,5 +59,6 @@ extern motor_config_t m_config;
 HAL_StatusTypeDef save_config_to_flash(motor_config_t *data);
 void read_config_from_flash(motor_config_t *data);
 void default_config(motor_config_t *data);
+void calc_torque_control_param(void);
 
 #endif

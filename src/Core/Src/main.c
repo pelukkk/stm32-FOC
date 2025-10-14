@@ -30,8 +30,10 @@
 #include "bldc_midi.h"
 #include "flash.h"
 #include "controller_app.h"
+#include "CAN.h"
 #include <stdio.h>
 #include <math.h>
+#include "complex.h"
 
 /* USER CODE END Includes */
 
@@ -56,9 +58,6 @@
 #define POLE_PAIR	(7)
 #define SPEED_CONTROL_CYCLE	10
 #define FOC_TS (1.0f / (float)BLDC_PWM_FREQ)
-
-#define RECEIVER_ID 0x02
-#define TRANSMITTER_ID 0x01
 
 /* USER CODE END PM */
 
@@ -90,7 +89,6 @@ int start_cal = 0;
 _Bool com_init_flag = 0;
 _Bool calibration_flag = 0;
 
-float test_angle_sp = 0.0f;
 
 float raw_encd_data;
 
@@ -111,7 +109,7 @@ void StartControlTask(void const * argument);
 void StartComTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
-
+extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -170,76 +168,100 @@ uint32_t get_dt_us(void) {
 
 /******************************************************************************/
 
-#define CAL_ITERATION 100
+void measure_result_display(void) {
+  char usb_buff[64];
 
-#define VD_CAL 0.6f
-#define VQ_CAL 0.0f
-
-void cal_encoder_misalignment(void) {
-  open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, 0.0f);
-  HAL_Delay(500);
-  float rad_offset = 0.0f;
-  for (int i = 0; i < CAL_ITERATION; i++) {
-    rad_offset += DEG_TO_RAD(hencd.angle_filtered);
-    HAL_Delay(1);
-  }
-  open_loop_voltage_control(&hfoc, 0.0f, 0.0f, 0.0f);
-  rad_offset = rad_offset / (float)CAL_ITERATION;
-  hfoc.m_angle_offset = rad_offset;
-  m_config.encd_offset = rad_offset;
-}
-
-float error_temp[ERROR_LUT_SIZE] = {0};
-
-void encoder_get_error(void) {
-  memset(error_temp, 0, sizeof(error_temp));
-
-  cal_encoder_misalignment();
-
-  for (int i = 0; i < ERROR_LUT_SIZE; i++) {
-    float mech_deg = (float)i * (360.0f / (float)ERROR_LUT_SIZE);
-    float elec_rad = DEG_TO_RAD(mech_deg * POLE_PAIR);
-    open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, elec_rad);
-    HAL_Delay(5);
-
-    float mech_rad = hfoc.m_angle_rad;
-    float raw_delta = elec_rad - hfoc.e_angle_rad;
-    float delta = elec_rad - hfoc.e_angle_rad_comp;
-    
-    raw_delta -= TWO_PI * floorf((raw_delta + PI) / TWO_PI);
-    delta -= TWO_PI * floorf((delta + PI) / TWO_PI);
-    
-    float lut_pos = (mech_rad / TWO_PI) * ERROR_LUT_SIZE;
-    int index = (int)(lut_pos);
-
-    while (index < 0) {
-      index += ERROR_LUT_SIZE;
-    }
-    index %= ERROR_LUT_SIZE;
-
-    error_temp[index] = raw_delta;
-    
-    // debug
-    float buffer_val[2];
-    // buffer_val[0] = raw_delta;
-    // buffer_val[1] = delta;
-    buffer_val[0] = delta;
-    send_data_float(buffer_val, 1);
+  for (int i = 0; i < MAX_I_SAMPLE; i++) {
+    float buffer_val[4] = {
+      Vd_buff[i], Vq_buff[i],
+      Id_buff[i], Iq_buff[i]
+    };
+    send_data_float(buffer_val, 4);
+    osDelay(1);
   }
   
-  for (int i = 0; i < ERROR_LUT_SIZE; i++) {
-    if (error_temp[i] == 0) {
-      int last_i = i - 1;
-      int next_i = i + 1;
-      if (last_i < 0) last_i += ERROR_LUT_SIZE;
-      if (next_i > ERROR_LUT_SIZE) next_i -= ERROR_LUT_SIZE;
-      error_temp[i] = (error_temp[last_i] + error_temp[next_i]) / 2.0f;
-    }
+  snprintf(usb_buff, sizeof(usb_buff), 
+          "Rs: %f\r\n"
+          "Ld: %f\r\n"
+          "Lq: %f\r\n\r\n", 
+          hfoc.Rs, hfoc.Ld, hfoc.Lq);
+  CDC_Transmit_FS((uint8_t*)usb_buff, sizeof(usb_buff));
+}
+
+int measure_RL() {
+  if (hfoc.v_bus  < 10.0f) {
+    return -1;
   }
 
-  memcpy(m_config.encd_error_comp, error_temp, sizeof(error_temp));
+  hfoc.meas_inj_freq = 200.0f;
+  hfoc.meas_inj_amp = 1.0f;
+  hfoc.meas_inj_omega = TWO_PI * hfoc.meas_inj_freq;
 
-  open_loop_voltage_control(&hfoc, 0.0f, 0.0f, 0.0f);
+  memset(Vd_buff, 0, sizeof(Vd_buff));
+  memset(Id_buff, 0, sizeof(Id_buff));
+  memset(Vq_buff, 0, sizeof(Vq_buff));
+  memset(Iq_buff, 0, sizeof(Iq_buff));
+
+  hfoc.meas_inj_target = VD;
+  osDelay(100);
+  hfoc.meas_inj_start_flag = 1;
+  // waiting process
+  while(hfoc.meas_inj_start_flag) {
+    osDelay(1);
+  }
+
+  hfoc.meas_inj_target = VQ;
+  osDelay(100);
+  hfoc.meas_inj_start_flag = 1;
+  // waiting process
+  while(hfoc.meas_inj_start_flag) {
+    osDelay(1);
+  }
+
+  estimate_motor_param_dq(&hfoc, FOC_TS);
+
+  return 0;
+}
+
+/******************************************************************************/
+
+_Bool test_bw_flag = 0;
+_Bool start_test_bw = 0;
+
+void test_bandwidth(void) {
+  start_test_bw = 1;
+  hfoc.id_ref = 1.0f;
+  hfoc.iq_ref = 0.0f;
+
+  while (start_test_bw) {
+    osDelay(1);
+  }
+  
+  for (int i = 0; i < MAX_I_SAMPLE; i++) {
+#if 0
+    send_data_float(&Id_buff[i], 4);
+#else
+    char usb_buff[64];
+    snprintf(usb_buff, sizeof(usb_buff), "%f\r\n", Id_buff[i]);
+    CDC_Transmit_FS((uint8_t*)usb_buff, sizeof(usb_buff));
+#endif
+    osDelay(1);
+  }
+  
+  hfoc.id_ref = 0.0f;
+  hfoc.iq_ref = 0.0f;
+}
+
+void test_bw_get_sample(void) {
+  static int s = 0;
+  if (start_test_bw) {
+    Id_buff[s] = hfoc.id_filtered;
+    s++;
+    if (s >= MAX_I_SAMPLE) {
+      s = 0;
+      start_test_bw = 0;
+    }
+  }
 }
 
 /******************************************************************************/
@@ -253,70 +275,6 @@ void svpwm_test(void) {
 
 /******************************************************************************/
 
-
-// Filter
-void CAN_FilterConfig(void)
-{
-  CAN_FilterTypeDef filter;
-  filter.FilterBank = 0;
-  filter.FilterMode = CAN_FILTERMODE_IDMASK;
-  filter.FilterScale = CAN_FILTERSCALE_32BIT;
-  filter.FilterIdHigh = 0x0000;
-  filter.FilterIdLow = 0x0000;
-  filter.FilterMaskIdHigh = 0x0000;
-  filter.FilterMaskIdLow = 0x0000;
-  filter.FilterFIFOAssignment = CAN_RX_FIFO0;
-  filter.FilterActivation = CAN_FILTER_ENABLE;
-  filter.SlaveStartFilterBank = 14;
-  HAL_CAN_ConfigFilter(&hcan1, &filter);
-}
-
-// Transmit
-void CAN_Send(uint32_t id, uint8_t *data, uint8_t len)
-{
-  CAN_TxHeaderTypeDef TxHeader;
-  uint32_t TxMailbox;
-
-  TxHeader.DLC = len;
-  TxHeader.StdId = id;
-  TxHeader.IDE = CAN_ID_STD;
-  TxHeader.RTR = CAN_RTR_DATA;
-
-  if (HAL_CAN_GetTxMailboxesFreeLevel(&hcan1) > 0) {
-    if (HAL_CAN_AddTxMessage(&hcan1, &TxHeader, data, &TxMailbox) != HAL_OK) {
-      // Error handling
-    }
-  }
-}
-
-/******************************************************************************/
-
-// Receive (Motor 2)
-void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan)
-{
-  CAN_RxHeaderTypeDef RxHeader;
-  uint8_t RxData[8];
-
-  if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
-    if (RxData[0] == 0xAA && RxData[1] == 0x55) {
-      LED_GPIO_Port->BSRR = LED_Pin<<16;
-    }
-    else if (RxData[0] == 0x55 && RxData[1] == 0xAA) {
-      LED_GPIO_Port->BSRR = LED_Pin;
-    }
-    else if (RxData[0] == 0x30) {
-      union { float f; uint8_t b[4]; } u;
-      u.b[0] = RxData[1];
-      u.b[1] = RxData[2];
-      u.b[2] = RxData[3];
-      u.b[3] = RxData[4];
-
-      test_angle_sp = u.f;
-    }
-  }
-}
-
-/******************************************************************************/
 
 // platformio run --target upload 
 // platformio run --target clean
@@ -373,14 +331,14 @@ int main(void)
 
   init_trig_lut();
   
+  hfoc.angle_filtered = &hencd.angle_filtered;
+  foc_set_torque_control_bandwidth(&hfoc, m_config.I_ctrl_bandwidth);
   pid_init(&hfoc.id_ctrl, m_config.id_kp, m_config.id_ki, 0.0f, FOC_TS, m_config.id_out_max, m_config.id_e_deadband);
   pid_init(&hfoc.iq_ctrl, m_config.iq_kp, m_config.iq_ki, 0.0f, FOC_TS, m_config.iq_out_max, m_config.iq_e_deadband);
   pid_init(&hfoc.speed_ctrl, m_config.speed_kp, m_config.speed_ki, 0.0f, FOC_TS * SPEED_CONTROL_CYCLE, m_config.speed_out_max, m_config.speed_e_deadband);
   pid_init(&hfoc.pos_ctrl, m_config.pos_kp, m_config.pos_ki, m_config.pos_kd, FOC_TS * SPEED_CONTROL_CYCLE, m_config.pos_out_max, m_config.pos_e_deadband);
 
-  CAN_FilterConfig();
-	HAL_CAN_Start(&hcan1);
-	HAL_CAN_ActivateNotification(&hcan1, CAN_IT_RX_FIFO0_MSG_PENDING);
+  CAN_init(&hcan1);
 
   AS5047P_config(&hencd, &hspi1, SPI_CS_GPIO_Port, SPI_CS_Pin);
   AS5047P_start(&hencd);
@@ -397,15 +355,15 @@ int main(void)
   foc_pwm_init(&hfoc, &(TIM1->CCR3), &(TIM1->CCR2), &(TIM1->CCR1), bldc.pwm_resolution);
   foc_motor_init(&hfoc, POLE_PAIR, 360);
 
-  foc_sensor_init(&hfoc, m_config.encd_offset, REVERSE_DIR); //1.8704f
+  foc_sensor_init(&hfoc, m_config.encd_offset, REVERSE_DIR);
   foc_gear_reducer_init(&hfoc, 1.0f);
   foc_set_limit_current(&hfoc, 10.0);
 
   HAL_TIM_Base_Start(&htim10);
 
-  hfoc.control_mode = POSITION_CONTROL_MODE;
+  // hfoc.control_mode = POSITION_CONTROL_MODE;
   // encoder_get_error();
-  // hfoc.control_mode = TORQUE_CONTROL_MODE;
+  hfoc.control_mode = TORQUE_CONTROL_MODE;
   // hfoc.control_mode = AUDIO_MODE;
 
   // kp=4.5 kd=0.3
@@ -416,26 +374,6 @@ int main(void)
     LED_GPIO_Port->BSRR = LED_Pin<<16;
     HAL_Delay(50);
   }
-
-  // Blink Test
-  // Transmit (Motor 1)
-  #if 0
-  while(1) {
-    uint8_t can_tx_buff[2];
-    
-    can_tx_buff[0] = 0xAA;
-    can_tx_buff[1] = 0x55;
-    CAN_Send(TRANSMITTER_ID, can_tx_buff, 2);
-    LED_GPIO_Port->BSRR = LED_Pin<<16;
-    HAL_Delay(500);
-    
-    can_tx_buff[0] = 0x55;
-    can_tx_buff[1] = 0xAA;
-    CAN_Send(TRANSMITTER_ID, can_tx_buff, 2);
-    LED_GPIO_Port->BSRR = LED_Pin;
-    HAL_Delay(500);
-  }
-  #endif
 
   /* USER CODE END 2 */
 
@@ -1065,7 +1003,15 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
         audio_loop(&hfoc);
         break;
       }
+      case CALIBRATION_MODE: {
+        DRV8302_get_current(&bldc, &hfoc.ia, &hfoc.ib);
+        meas_inj_dq_process(&hfoc, FOC_TS);
+        break;
+      }
       case TEST_MODE: {
+        DRV8302_get_current(&bldc, &hfoc.ia, &hfoc.ib);
+        foc_current_control_update(&hfoc);
+        test_bw_get_sample();
         break;
       }
       default:
@@ -1115,8 +1061,20 @@ void StartControlTask(void const * argument)
     
     if (hfoc.control_mode == CALIBRATION_MODE) {
       if (start_cal == 1) {
-        encoder_get_error();
+        foc_cal_encoder(&hfoc);
+        
+        if (measure_RL() == 0) {
+          calc_torque_control_param();
+          measure_result_display();
+        }
+
         start_cal = 0;
+      }
+    }
+    else if (hfoc.control_mode == TEST_MODE) {
+      if (test_bw_flag) {
+        test_bandwidth();
+        test_bw_flag = 0;
       }
     }
     osDelay(1);
@@ -1143,26 +1101,27 @@ void StartComTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    if (HAL_GetTick() - debug_tick >= 50) {
+    if (HAL_GetTick() - debug_tick >= 10) {
       debug_tick = HAL_GetTick();
       float data[16];
       uint16_t len = 0;
 
       switch (hfoc.control_mode) {
       case TORQUE_CONTROL_MODE:
-        // data[len++] = sp_input;
-        data[len++] = hfoc.e_angle_rad_comp;
-        // data[len++] = hfoc.id_filtered;
-        // data[len++] = hfoc.iq_filtered;
-        data[len++] = hfoc.ia;
-        data[len++] = hfoc.ib;
+        data[len++] = sp_input;
+        // data[len++] = hfoc.e_angle_rad_comp;
+        data[len++] = hfoc.id_filtered;
+        data[len++] = hfoc.iq_filtered;
+        // data[len++] = hfoc.ia;
+        // data[len++] = hfoc.ib;
+        // data[len++] = hfoc.actual_rpm;
         break;
       case SPEED_CONTROL_MODE:
         data[len++] = sp_input;
         data[len++] = hfoc.actual_rpm;
         break;
       case POSITION_CONTROL_MODE:
-        data[len++] = test_angle_sp;//sp_input;
+        data[len++] = sp_input;//test_angle_sp;
         data[len++] = hfoc.actual_angle;
         // data[len++] = hfoc.iq;
         break;
@@ -1170,8 +1129,8 @@ void StartComTask(void const * argument)
         data[len++] = v_tone;
         break;
       case CALIBRATION_MODE:
-        data[len++] = hencd.prev_raw_angle;
-        data[len++] = hencd.angle_filtered;
+        // data[len++] = hencd.prev_raw_angle;
+        // data[len++] = hencd.angle_filtered;
         break;
       case TEST_MODE:
         // data[len++] = hfoc.v_bus;
@@ -1254,7 +1213,7 @@ void StartComTask(void const * argument)
       can_tx_buff[2] = u.b[1];
       can_tx_buff[3] = u.b[2];
       can_tx_buff[4] = u.b[3];
-      CAN_Send(TRANSMITTER_ID, can_tx_buff, 5);
+      CAN_Send(&hcan1, TRANSMITTER_ID, can_tx_buff, 5);
     }
     osDelay(1);
   }

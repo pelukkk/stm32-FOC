@@ -3,6 +3,9 @@
 
 motor_config_t m_config;
 
+/* extern from main.c */
+extern foc_t hfoc;
+
 HAL_StatusTypeDef save_config_to_flash(motor_config_t *data) {
     HAL_StatusTypeDef status;
     FLASH_EraseInitTypeDef EraseInitStruct;
@@ -62,6 +65,8 @@ void default_config(motor_config_t *data) {
     data->iq_out_max = 15.0f;
     data->iq_e_deadband = 0.0001f;
 
+    data->I_ctrl_bandwidth = 50.0f;
+
     data->speed_kp = 0.05f;
     data->speed_ki = 0.7f;
     data->speed_out_max = 10.0f;
@@ -82,4 +87,25 @@ void default_config(motor_config_t *data) {
     data->freq = 10000;
     data->dir = NORMAL_DIR;
     data->gear_ratio = 1.0f;
+}
+
+
+void calc_torque_control_param(void) {
+  if (hfoc.Rs <= 0.0f || hfoc.Rs > 3.0f ||
+      hfoc.Ld <= 0.0f || hfoc.Ld > 3.0f ||
+      hfoc.Lq <= 0.0f || hfoc.Lq > 3.0f ||
+      hfoc.I_ctrl_bandwidth <= 0.0f)
+      return;
+
+  float omega = TWO_PI * hfoc.I_ctrl_bandwidth;
+
+  hfoc.id_ctrl.kp = hfoc.Ld * omega;
+  hfoc.id_ctrl.ki = hfoc.Rs * omega;
+  hfoc.iq_ctrl.kp = hfoc.Lq * omega;
+  hfoc.iq_ctrl.ki = hfoc.Rs * omega;
+
+  m_config.id_kp = hfoc.id_ctrl.kp;
+  m_config.id_ki = hfoc.id_ctrl.ki;
+  m_config.iq_kp = hfoc.iq_ctrl.kp;
+  m_config.iq_ki = hfoc.iq_ctrl.ki;
 }

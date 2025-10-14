@@ -17,11 +17,23 @@
 #define MAG_CAL_RES (1024*2)
 #define MAG_CAL_STEP ((TWO_PI * POLE_PAIR) / (float)MAG_CAL_RES)
 
+#define CAL_ITERATION 100
+
+#define VD_CAL 0.6f
+#define VQ_CAL 0.0f
+
 #define is_foc_ready() (foc_ready)
 #define foc_reset_flag() (foc_ready = 0)
 #define foc_set_flag() (foc_ready = 1)
 
+#define MAX_I_SAMPLE 256
+
+/* extern variable */
 extern _Bool foc_ready;
+extern float Vd_buff[MAX_I_SAMPLE];
+extern float Vq_buff[MAX_I_SAMPLE];
+extern float Id_buff[MAX_I_SAMPLE];
+extern float Iq_buff[MAX_I_SAMPLE];
 
 typedef enum {
 	TORQUE_CONTROL_MODE,
@@ -36,13 +48,24 @@ typedef enum {
 	NORMAL_DIR, REVERSE_DIR
 }dir_mode_t;
 
+typedef enum {
+  VD, VQ
+}inject_taregt_t;
 
 typedef struct {
 	uint8_t pole_pairs;
 	float kv;
-	float La, Lb, Lc;
-	float Ra, Rb, Rc;
+	float Rs;
+	float Ld;
+	float Lq;
 	float max_current;
+
+	float meas_inj_freq;
+	float meas_inj_amp;
+	float meas_inj_omega;
+	inject_taregt_t meas_inj_target;
+	int meas_inj_n;
+	_Bool meas_inj_start_flag;
 
 	float m_angle_rad; // mechanical angle
 	float e_angle_rad; // electrical angle
@@ -60,6 +83,7 @@ typedef struct {
 	float actual_rpm;
 	float actual_angle;
 
+	float I_ctrl_bandwidth;
 	float id_ref, iq_ref;
 	float rpm_ref;
 
@@ -78,6 +102,7 @@ typedef struct {
 
 	float gear_ratio;
 	dir_mode_t sensor_dir;
+	float *angle_filtered;
 }foc_t;
 
 void foc_pwm_init(foc_t *hfoc, volatile uint32_t *pwm_a, volatile uint32_t *pwm_b, volatile uint32_t *pwm_c,
@@ -90,6 +115,11 @@ void foc_current_control_update(foc_t *hfoc);
 void foc_speed_control_update(foc_t *hfoc, float rpm_reference);
 void foc_position_control_update(foc_t *hfoc, float deg_reference);
 void foc_calc_electric_angle(foc_t *hfoc, float m_rad);
+void foc_cal_encoder_misalignment(foc_t *hfoc);
+void foc_cal_encoder(foc_t *hfoc);
+void foc_set_torque_control_bandwidth(foc_t *hfoc, float bandwidth);
 void open_loop_voltage_control(foc_t *hfoc, float vd_ref, float vq_ref, float angle_rad);
+void meas_inj_dq_process(foc_t *hfoc, float ts);
+void estimate_motor_param_dq(foc_t *hfoc, float ts);
 
 #endif /* FOC_INC_FOC_UTILS_H_ */

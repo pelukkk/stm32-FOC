@@ -7,6 +7,10 @@
         "stm32f4xx_hal_can.h": "c",
         "stm32f4xx_hal_flash.h": "c",
         "stm32f4xx_hal_tim.h": "c",
-        "stm32f4xx_hal_pcd.h": "c"
+        "stm32f4xx_hal_pcd.h": "c",
+        "pid_utils.h": "c",
+        "foc_utils.h": "c",
+        "foc_math.h": "c",
+        "sstream": "c"
     }
 }

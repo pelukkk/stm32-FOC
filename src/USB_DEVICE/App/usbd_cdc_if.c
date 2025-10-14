@@ -37,7 +37,7 @@
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
-
+static char usb_send_buff[128];
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -81,7 +81,11 @@
 
 /* USER CODE BEGIN PRIVATE_MACRO */
 
-#define usb_print(str)  CDC_Transmit_FS((uint8_t *)(str), sizeof(str) - 1)
+#define usb_print(fmt, ...)                      \
+    do {                                          \
+        snprintf(usb_send_buff, sizeof(usb_send_buff), fmt, ##__VA_ARGS__); \
+        CDC_Transmit_FS((uint8_t *)(usb_send_buff), sizeof(usb_send_buff) - 1);             \
+    } while (0)
 
 /* USER CODE END PRIVATE_MACRO */
 
@@ -126,6 +130,7 @@ extern int note_piano[];
 extern int start_cal;
 extern _Bool com_init_flag;
 extern _Bool calibration_flag;
+extern _Bool test_bw_flag;
 /* USER CODE END EXPORTED_VARIABLES */
 
 /**
@@ -268,11 +273,15 @@ void get_pid_param(void) {
   switch (hfoc.control_mode) {
   case TORQUE_CONTROL_MODE:
     len = sprintf(write_buffer, "Current Control param:\n"
-                                "Kp:%f\n"
-                                "Ki:%f\n"
+                                "Kp(Id):%f\n"
+                                "Ki(Id):%f\n"
+                                "Kp(Iq):%f\n"
+                                "Ki(Iq):%f\n"
                                 "Deadband:%f\n"
-                                "Max output:%f\n", 
-                                hfoc.id_ctrl.kp, hfoc.id_ctrl.ki, hfoc.id_ctrl.e_deadband, hfoc.id_ctrl.out_max);
+                                "Max output:%f\n",  
+                                hfoc.id_ctrl.kp, hfoc.id_ctrl.ki, 
+                                hfoc.iq_ctrl.kp, hfoc.iq_ctrl.ki, 
+                                hfoc.id_ctrl.e_deadband, hfoc.id_ctrl.out_max);
     break;
   case SPEED_CONTROL_MODE:
     len = sprintf(write_buffer, "Speed Control param:\n"
@@ -476,6 +485,23 @@ static int8_t CDC_Receive_FS(uint8_t* Buf, uint32_t *Len)
     hfoc.control_mode = CALIBRATION_MODE;
     calibration_flag = 1;
   }
+	else if (strstr(cmd, "test")) {
+    usb_print("start test pulse response\r\n");
+    hfoc.control_mode = TEST_MODE;
+    test_bw_flag = 1;
+  }
+	else if (strstr(cmd, "get_bandwidth")) {
+    usb_print("Current Bandwidth:%.2f\r\n", hfoc.I_ctrl_bandwidth);
+  }
+	else if (strstr(cmd, "set_bandwidth")) {
+    float bandwidth;
+		parse_float_value(cmd, '=', &bandwidth);
+    hfoc.I_ctrl_bandwidth = bandwidth;
+    m_config.I_ctrl_bandwidth = bandwidth;
+    calc_torque_control_param();
+
+    usb_print("New Bandwidth:%.2f\r\n", hfoc.I_ctrl_bandwidth);
+	}
 	else if (strstr(cmd, "sp")) {
 		parse_float_value(cmd, '=', &sp_input);
 	}

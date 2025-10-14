@@ -1,6 +1,7 @@
 
 #include "bldc_midi.h"
 #include "math.h"
+#include "stm32f4xx_hal.h"
 
 // Pre-calculated frequency table for all MIDI notes (0-127)
 static const float MIDI_NOTE_FREQ[128] = {

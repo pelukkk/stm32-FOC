@@ -7,10 +7,18 @@
 
 #include "FOC_utils.h"
 #include "flash.h"
+#include "controller_app.h"
 #include <math.h>
-
+#include <string.h>
 
 _Bool foc_ready = 0;
+
+float Vd_buff[MAX_I_SAMPLE];
+float Vq_buff[MAX_I_SAMPLE];
+float Id_buff[MAX_I_SAMPLE];
+float Iq_buff[MAX_I_SAMPLE];
+
+float error_temp[ERROR_LUT_SIZE] = {0};
 
 /**
  * @brief Initialize PWM output pointers for FOC controller
@@ -18,6 +26,7 @@ _Bool foc_ready = 0;
  * @param pwm_a Pointer to PWM channel A register (e.g., &TIM1->CCR1)
  * @param pwm_b Pointer to PWM channel B register (e.g., &TIM1->CCR2)
  * @param pwm_c Pointer to PWM channel C register (e.g., &TIM1->CCR3)
+ * @param pwm_res PWM resolution
  */
 void foc_pwm_init(foc_t *hfoc, volatile uint32_t *pwm_a, volatile uint32_t *pwm_b, volatile uint32_t *pwm_c,
 		uint32_t pwm_res) {
@@ -90,7 +99,7 @@ void foc_current_control_update(foc_t *hfoc) {
     clarke_park_transform(hfoc->ia, hfoc->ib, sin_theta, cos_theta, &hfoc->id, &hfoc->iq);
 
     // LPF id & iq
-    const float alpha_i_filt = 0.1f;
+    const float alpha_i_filt = 0.5f;
     hfoc->id_filtered = (1.0f - alpha_i_filt) * hfoc->id_filtered + alpha_i_filt * hfoc->id;
     hfoc->iq_filtered = (1.0f - alpha_i_filt) * hfoc->iq_filtered + alpha_i_filt * hfoc->iq;
 
@@ -186,6 +195,75 @@ void foc_calc_electric_angle(foc_t *hfoc, float m_rad) {
     hfoc->e_angle_rad_comp = e_rad;
 }
 
+void foc_cal_encoder_misalignment(foc_t *hfoc) {
+  open_loop_voltage_control(hfoc, VD_CAL, VQ_CAL, 0.0f);
+  HAL_Delay(500);
+  float rad_offset = 0.0f;
+  for (int i = 0; i < CAL_ITERATION; i++) {
+    rad_offset += DEG_TO_RAD(*hfoc->angle_filtered);
+    HAL_Delay(1);
+  }
+  open_loop_voltage_control(hfoc, 0.0f, 0.0f, 0.0f);
+  rad_offset = rad_offset / (float)CAL_ITERATION;
+  hfoc->m_angle_offset = rad_offset;
+  m_config.encd_offset = rad_offset;
+}
+
+void foc_cal_encoder(foc_t *hfoc) {
+  memset(error_temp, 0, sizeof(error_temp));
+
+  foc_cal_encoder_misalignment(hfoc);
+
+  for (int i = 0; i < ERROR_LUT_SIZE; i++) {
+    float mech_deg = (float)i * (360.0f / (float)ERROR_LUT_SIZE);
+    float elec_rad = DEG_TO_RAD(mech_deg * hfoc->pole_pairs);
+    open_loop_voltage_control(hfoc, VD_CAL, VQ_CAL, elec_rad);
+    HAL_Delay(5);
+
+    float mech_rad = hfoc->m_angle_rad;
+    float raw_delta = elec_rad - hfoc->e_angle_rad;
+    float delta = elec_rad - hfoc->e_angle_rad_comp;
+    
+    raw_delta -= TWO_PI * floorf((raw_delta + PI) / TWO_PI);
+    delta -= TWO_PI * floorf((delta + PI) / TWO_PI);
+    
+    float lut_pos = (mech_rad / TWO_PI) * ERROR_LUT_SIZE;
+    int index = (int)(lut_pos);
+
+    while (index < 0) {
+      index += ERROR_LUT_SIZE;
+    }
+    index %= ERROR_LUT_SIZE;
+
+    error_temp[index] = raw_delta;
+    
+    // debug
+    float buffer_val[2];
+    // buffer_val[0] = raw_delta;
+    // buffer_val[1] = delta;
+    buffer_val[0] = delta;
+    send_data_float(buffer_val, 1);
+  }
+  
+  for (int i = 0; i < ERROR_LUT_SIZE; i++) {
+    if (error_temp[i] == 0) {
+      int last_i = i - 1;
+      int next_i = i + 1;
+      if (last_i < 0) last_i += ERROR_LUT_SIZE;
+      if (next_i > ERROR_LUT_SIZE) next_i -= ERROR_LUT_SIZE;
+      error_temp[i] = (error_temp[last_i] + error_temp[next_i]) / 2.0f;
+    }
+  }
+
+  memcpy(m_config.encd_error_comp, error_temp, sizeof(error_temp));
+
+  open_loop_voltage_control(hfoc, 0.0f, 0.0f, 0.0f);
+}
+
+void foc_set_torque_control_bandwidth(foc_t *hfoc, float bandwidth) {
+    hfoc->I_ctrl_bandwidth = bandwidth;
+}
+
 void open_loop_voltage_control(foc_t *hfoc, float vd_ref, float vq_ref, float angle_rad) {
     float valpha, vbeta;
     uint32_t da, db, dc;
@@ -199,4 +277,114 @@ void open_loop_voltage_control(foc_t *hfoc, float vd_ref, float vq_ref, float an
     *(hfoc->pwm_a) = CONSTRAIN(da, 0, pwm_res);
     *(hfoc->pwm_b) = CONSTRAIN(db, 0, pwm_res);
     *(hfoc->pwm_c) = CONSTRAIN(dc, 0, pwm_res);
+}
+
+void meas_inj_dq_process(foc_t *hfoc, float ts) {
+  if (hfoc->meas_inj_start_flag) {
+    float angle = hfoc->meas_inj_omega * hfoc->meas_inj_n * ts;
+    float v_inj = hfoc->meas_inj_amp * fast_sin(angle);
+    float vd, vq;
+    if (hfoc->meas_inj_target == VD) {
+        vd = v_inj;
+        vq = 0.0f;
+    }
+    else if (hfoc->meas_inj_target == VQ) {
+        vd = 0.0f;
+        vq = v_inj;
+    }
+    else return;
+
+    float theta_e = hfoc->e_angle_rad_comp;
+
+    open_loop_voltage_control(hfoc, vd, vq, theta_e);
+
+    float sin_theta, cos_theta;
+    float id, iq;
+    pre_calc_sin_cos(theta_e, &sin_theta, &cos_theta);
+    clarke_park_transform(hfoc->ia, hfoc->ib, sin_theta, cos_theta, &id, &iq);
+
+    if (hfoc->meas_inj_target == VD) {
+        Vd_buff[hfoc->meas_inj_n] = vd;
+        Id_buff[hfoc->meas_inj_n] = id;
+    }
+    else if (hfoc->meas_inj_target == VQ) {
+        Vq_buff[hfoc->meas_inj_n] = vq;
+        Iq_buff[hfoc->meas_inj_n] = iq;
+    }
+
+    hfoc->meas_inj_n++;
+    if (hfoc->meas_inj_n >= MAX_I_SAMPLE) {
+        hfoc->meas_inj_n = 0;
+        hfoc->meas_inj_start_flag = 0;
+        open_loop_voltage_control(hfoc, 0, 0, 0);
+    }
+  }
+}
+
+void estimate_motor_param_dq(foc_t *hfoc, float ts) {
+    float Vc_d = 0, Vs_d = 0, Ic_d = 0, Is_d = 0;
+    float Vc_q = 0, Vs_q = 0, Ic_q = 0, Is_q = 0;
+    float mean_vd = 0, mean_vq = 0, mean_id = 0, mean_iq = 0;
+
+    // --- Hilangkan DC offset ---
+    for (int i = 0; i < MAX_I_SAMPLE; i++) {
+        mean_vd += Vd_buff[i];
+        mean_vq += Vq_buff[i];
+        mean_id += Id_buff[i];
+        mean_iq += Iq_buff[i];
+    }
+    mean_vd /= MAX_I_SAMPLE;
+    mean_vq /= MAX_I_SAMPLE;
+    mean_id /= MAX_I_SAMPLE;
+    mean_iq /= MAX_I_SAMPLE;
+
+    // --- Hitung komponen DFT fundamental ---
+    for (int i = 0; i < MAX_I_SAMPLE; i++) {
+        float angle = hfoc->meas_inj_omega * i * ts;
+
+        float vd = Vd_buff[i] - mean_vd;
+        float vq = Vq_buff[i] - mean_vq;
+        float id = Id_buff[i] - mean_id;
+        float iq = Iq_buff[i] - mean_iq;
+
+        // korelasi cos dan sin
+        Vc_d += vd * fast_cos(angle);
+        Vs_d += vd * fast_sin(angle);
+        Ic_d += id * fast_cos(angle);
+        Is_d += id * fast_sin(angle);
+
+        Vc_q += vq * fast_cos(angle);
+        Vs_q += vq * fast_sin(angle);
+        Ic_q += iq * fast_cos(angle);
+        Is_q += iq * fast_sin(angle);
+    }
+
+    float norm = 2.0f / MAX_I_SAMPLE;
+    Vc_d *= norm; Vs_d *= norm;
+    Ic_d *= norm; Is_d *= norm;
+    Vc_q *= norm; Vs_q *= norm;
+    Ic_q *= norm; Is_q *= norm;
+
+    // --- Amplitudo tegangan dan arus ---
+    float Vd_mag = sqrtf(Vc_d * Vc_d + Vs_d * Vs_d);
+    float Id_mag = sqrtf(Ic_d * Ic_d + Is_d * Is_d);
+    float Vq_mag = sqrtf(Vc_q * Vc_q + Vs_q * Vs_q);
+    float Iq_mag = sqrtf(Ic_q * Ic_q + Is_q * Is_q);
+
+    // --- Sudut fasa (phi = arctan(Vs/Vc) - arctan(Is/Ic)) ---
+    float phi_d = atan2f(Vs_d, Vc_d) - atan2f(Is_d, Ic_d);
+    float phi_q = atan2f(Vs_q, Vc_q) - atan2f(Is_q, Ic_q);
+
+    // --- Impedansi dan parameter ---
+    float Zd_mag = Vd_mag / Id_mag;
+    float Zq_mag = Vq_mag / Iq_mag;
+
+    float Rs_d = Zd_mag * cosf(phi_d);
+    float Rs_q = Zq_mag * cosf(phi_q);
+    float Ld_est = (Zd_mag * sinf(phi_d)) / hfoc->meas_inj_omega;
+    float Lq_est = (Zq_mag * sinf(phi_q)) / hfoc->meas_inj_omega;
+
+    hfoc->Rs = (Rs_d + Rs_q) * 0.5;
+    hfoc->Ld = fabs(Ld_est);
+    hfoc->Lq = fabs(Lq_est);
 }
