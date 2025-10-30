@@ -31,6 +31,9 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 ---
 
 ## UPDATE LOG
+30-10-2025
+- change algorithm to estimate resistance using constant voltage (vd)
+
 15-10-2025
 - self commissioning, auto calculate Motor Resistance and Inductance (Rs, Ld, and Lq)
 - Auto Calculate PI Gain Current Control loop using R, L, and Bandwidth

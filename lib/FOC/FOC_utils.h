@@ -49,7 +49,7 @@ typedef enum {
 }dir_mode_t;
 
 typedef enum {
-  VD, VQ
+  RS, LD, LQ
 }inject_taregt_t;
 
 typedef struct {
@@ -120,6 +120,7 @@ void foc_cal_encoder(foc_t *hfoc);
 void foc_set_torque_control_bandwidth(foc_t *hfoc, float bandwidth);
 void open_loop_voltage_control(foc_t *hfoc, float vd_ref, float vq_ref, float angle_rad);
 void meas_inj_dq_process(foc_t *hfoc, float ts);
-void estimate_motor_param_dq(foc_t *hfoc, float ts);
+void estimate_resistance(foc_t *hfoc);
+void estimate_inductance(foc_t *hfoc, float ts);
 
 #endif /* FOC_INC_FOC_UTILS_H_ */

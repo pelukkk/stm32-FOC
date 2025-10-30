@@ -43,4 +43,6 @@ void inverse_clarke_transform(float valpha, float vbeta, float *va, float *vb, f
 void svpwm(float valpha, float vbeta, float vbus, uint32_t pwm_period,
 			uint32_t *pwm_u, uint32_t *pwm_v, uint32_t *pwm_w);
 
+void vabc_to_vdq(float va, float vb, float vc, float sin_theta, float cos_theta, float *vd, float *vq);
+
 #endif /* FOC_INC_FOC_MATH_H_ */

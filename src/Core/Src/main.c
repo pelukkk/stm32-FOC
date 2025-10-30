@@ -150,6 +150,18 @@ float get_power_voltage(void) {
 	return pv_filtered;
 }
 
+void get_v_phase(foc_t *hfoc) {
+  const float filter_alpha = 0.98f; 
+
+  float va = (float)ADC3->JDR2 * ADC_2_POWER_VOLT * 0.810810811;
+  float vb = (float)ADC3->JDR3 * ADC_2_POWER_VOLT * 0.625;
+  float vc = (float)ADC3->JDR4 * ADC_2_POWER_VOLT * 0.769230769;
+
+  hfoc->va = (1.0f - filter_alpha) * hfoc->va + filter_alpha * va;
+  hfoc->vb = (1.0f - filter_alpha) * hfoc->vb + filter_alpha * vb;
+  hfoc->vc = (1.0f - filter_alpha) * hfoc->vc + filter_alpha * vc;
+}
+
 /******************************************************************************/
 
 uint32_t get_dt_us(void) {
@@ -168,8 +180,81 @@ uint32_t get_dt_us(void) {
 
 /******************************************************************************/
 
-void measure_result_display(void) {
-  char usb_buff[64];
+int measure_R(float vdc) {
+  char usb_buff[128];
+
+  if (hfoc.v_bus  < 10.0f) {
+    return -1;
+  }
+
+  hfoc.meas_inj_amp = vdc;
+
+  memset(Vd_buff, 0, sizeof(Vd_buff));
+  memset(Id_buff, 0, sizeof(Id_buff));
+
+  hfoc.meas_inj_target = RS;
+  osDelay(100);
+  hfoc.meas_inj_start_flag = 1;
+  // waiting process
+  while(hfoc.meas_inj_start_flag) {
+    osDelay(1);
+  }
+  
+  estimate_resistance(&hfoc);
+
+#if 0
+  for (int i = 0; i < MAX_I_SAMPLE; i++) {
+    float buffer_val[2] = {
+      Vd_buff[i],
+      Id_buff[i]
+    };
+    send_data_float(buffer_val, 2);
+    osDelay(1);
+  }
+#endif
+
+  snprintf(usb_buff, sizeof(usb_buff), 
+          "Estimate Resistance @(V=%.2f)\r\n"
+          "Rs: %f\r\n\r\n",
+          hfoc.meas_inj_amp, hfoc.Rs);
+  CDC_Transmit_FS((uint8_t*)usb_buff, sizeof(usb_buff));
+
+  return 0;
+}
+
+int measure_L(float f, float amp) {
+  char usb_buff[128];
+
+  if (hfoc.v_bus  < 10.0f) {
+    return -1;
+  }
+
+  hfoc.meas_inj_freq = f;
+  hfoc.meas_inj_amp = amp;
+  hfoc.meas_inj_omega = TWO_PI * hfoc.meas_inj_freq;
+
+  memset(Vd_buff, 0, sizeof(Vd_buff));
+  memset(Id_buff, 0, sizeof(Id_buff));
+  memset(Vq_buff, 0, sizeof(Vq_buff));
+  memset(Iq_buff, 0, sizeof(Iq_buff));
+
+  hfoc.meas_inj_target = LD;
+  osDelay(100);
+  hfoc.meas_inj_start_flag = 1;
+  // waiting process
+  while(hfoc.meas_inj_start_flag) {
+    osDelay(1);
+  }
+
+  hfoc.meas_inj_target = LQ;
+  osDelay(100);
+  hfoc.meas_inj_start_flag = 1;
+  // waiting process
+  while(hfoc.meas_inj_start_flag) {
+    osDelay(1);
+  }
+
+  estimate_inductance(&hfoc, FOC_TS);
 
   for (int i = 0; i < MAX_I_SAMPLE; i++) {
     float buffer_val[4] = {
@@ -181,44 +266,11 @@ void measure_result_display(void) {
   }
   
   snprintf(usb_buff, sizeof(usb_buff), 
-          "Rs: %f\r\n"
+          "Estimate Inductance @(f=%.2fHz)\r\n"
           "Ld: %f\r\n"
           "Lq: %f\r\n\r\n", 
-          hfoc.Rs, hfoc.Ld, hfoc.Lq);
+          hfoc.meas_inj_freq, hfoc.Rs, hfoc.Ld, hfoc.Lq);
   CDC_Transmit_FS((uint8_t*)usb_buff, sizeof(usb_buff));
-}
-
-int measure_RL() {
-  if (hfoc.v_bus  < 10.0f) {
-    return -1;
-  }
-
-  hfoc.meas_inj_freq = 200.0f;
-  hfoc.meas_inj_amp = 1.0f;
-  hfoc.meas_inj_omega = TWO_PI * hfoc.meas_inj_freq;
-
-  memset(Vd_buff, 0, sizeof(Vd_buff));
-  memset(Id_buff, 0, sizeof(Id_buff));
-  memset(Vq_buff, 0, sizeof(Vq_buff));
-  memset(Iq_buff, 0, sizeof(Iq_buff));
-
-  hfoc.meas_inj_target = VD;
-  osDelay(100);
-  hfoc.meas_inj_start_flag = 1;
-  // waiting process
-  while(hfoc.meas_inj_start_flag) {
-    osDelay(1);
-  }
-
-  hfoc.meas_inj_target = VQ;
-  osDelay(100);
-  hfoc.meas_inj_start_flag = 1;
-  // waiting process
-  while(hfoc.meas_inj_start_flag) {
-    osDelay(1);
-  }
-
-  estimate_motor_param_dq(&hfoc, FOC_TS);
 
   return 0;
 }
@@ -443,11 +495,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-#if (HSE_VALUE == 16000000U)
   RCC_OscInitStruct.PLL.PLLM = 8;
-#else
-  RCC_OscInitStruct.PLL.PLLM = 6;
-#endif
   RCC_OscInitStruct.PLL.PLLN = 168;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = 7;
@@ -674,6 +722,34 @@ static void MX_ADC3_Init(void)
   {
     Error_Handler();
   }
+#if 0
+  /** Configures for the selected ADC injected channel its corresponding rank in the sequencer and its sample time
+  */
+  sConfigInjected.InjectedChannel = ADC_CHANNEL_10;
+  sConfigInjected.InjectedRank = 2;
+  if (HAL_ADCEx_InjectedConfigChannel(&hadc3, &sConfigInjected) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configures for the selected ADC injected channel its corresponding rank in the sequencer and its sample time
+  */
+  sConfigInjected.InjectedChannel = ADC_CHANNEL_11;
+  sConfigInjected.InjectedRank = 3;
+  if (HAL_ADCEx_InjectedConfigChannel(&hadc3, &sConfigInjected) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configures for the selected ADC injected channel its corresponding rank in the sequencer and its sample time
+  */
+  sConfigInjected.InjectedChannel = ADC_CHANNEL_12;
+  sConfigInjected.InjectedRank = 4;
+  if (HAL_ADCEx_InjectedConfigChannel(&hadc3, &sConfigInjected) != HAL_OK)
+  {
+    Error_Handler();
+  }
+#endif
   /* USER CODE BEGIN ADC3_Init 2 */
 
   /* USER CODE END ADC3_Init 2 */
@@ -696,11 +772,11 @@ static void MX_CAN1_Init(void)
 
   /* USER CODE END CAN1_Init 1 */
   hcan1.Instance = CAN1;
-  hcan1.Init.Prescaler = 15;
+  hcan1.Init.Prescaler = 6;
   hcan1.Init.Mode = CAN_MODE_NORMAL;
   hcan1.Init.SyncJumpWidth = CAN_SJW_2TQ;
-  hcan1.Init.TimeSeg1 = CAN_BS1_2TQ;
-  hcan1.Init.TimeSeg2 = CAN_BS2_3TQ;
+  hcan1.Init.TimeSeg1 = CAN_BS1_8TQ;
+  hcan1.Init.TimeSeg2 = CAN_BS2_5TQ;
   hcan1.Init.TimeTriggeredMode = DISABLE;
   hcan1.Init.AutoBusOff = DISABLE;
   hcan1.Init.AutoWakeUp = DISABLE;
@@ -884,7 +960,7 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA2_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 5, 1);
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 6, 0);
   HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
   /* DMA2_Stream3_IRQn interrupt configuration */
   HAL_NVIC_SetPriority(DMA2_Stream3_IRQn, 7, 0);
@@ -982,6 +1058,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
     }
 
     hfoc.v_bus = get_power_voltage();
+    // get_v_phase(&hfoc);
     
     switch(hfoc.control_mode) {
       case TORQUE_CONTROL_MODE:
@@ -1030,8 +1107,6 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
 /* USER CODE END Header_StartControlTask */
 void StartControlTask(void const * argument)
 {
-  /* init code for USB_DEVICE */
-  // MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 5 */
   /* Infinite loop */
   for(;;)
@@ -1062,11 +1137,13 @@ void StartControlTask(void const * argument)
     if (hfoc.control_mode == CALIBRATION_MODE) {
       if (start_cal == 1) {
         foc_cal_encoder(&hfoc);
-        
-        if (measure_RL() == 0) {
-          calc_torque_control_param();
-          measure_result_display();
-        }
+
+        measure_R(1.0f);
+        measure_L(400.0f, 1.0f);
+        // measure_L(392.0f, 1.0f);
+        // measure_L(440.0f, 1.0f);
+        // measure_L(493.9f, 1.0f);
+        calc_torque_control_param();
 
         start_cal = 0;
       }
@@ -1108,13 +1185,10 @@ void StartComTask(void const * argument)
 
       switch (hfoc.control_mode) {
       case TORQUE_CONTROL_MODE:
-        data[len++] = sp_input;
         // data[len++] = hfoc.e_angle_rad_comp;
+        data[len++] = sp_input;
         data[len++] = hfoc.id_filtered;
         data[len++] = hfoc.iq_filtered;
-        // data[len++] = hfoc.ia;
-        // data[len++] = hfoc.ib;
-        // data[len++] = hfoc.actual_rpm;
         break;
       case SPEED_CONTROL_MODE:
         data[len++] = sp_input;
@@ -1180,16 +1254,21 @@ void StartComTask(void const * argument)
         change_legend(1, "actual angle"); osDelay(1);
         break;
       case CALIBRATION_MODE:
-        send_data_float(data, 1); osDelay(1);
+        // send_data_float(data, 1); osDelay(1);
+        // change_title("CALIBRATION MODE"); osDelay(1);
+        // change_legend(0, "error angle (rad)"); osDelay(1);
+        send_data_float(data, 4); osDelay(1);
         change_title("CALIBRATION MODE"); osDelay(1);
-        change_legend(0, "error angle (rad)"); osDelay(1);
+        change_legend(0, "Vd"); osDelay(1);
+        change_legend(1, "Vq"); osDelay(1);
+        change_legend(2, "Id"); osDelay(1);
+        change_legend(3, "Iq"); osDelay(1);
         start_cal = 1;
         break;
       case AUDIO_MODE:
         send_data_float(data, 1); osDelay(1);
         change_title("AUDIO MODE"); osDelay(1);
         change_legend(0, "vd"); osDelay(1);
-        start_cal = 1;
         break;
       case TEST_MODE:
         send_data_float(data, 3); osDelay(1);

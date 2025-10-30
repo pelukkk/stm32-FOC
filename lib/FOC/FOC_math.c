@@ -75,6 +75,15 @@ void inverse_clarke_transform(float valpha, float vbeta, float *va, float *vb, f
     *vc = -0.5f * valpha - SQRT3_BY_TWO * vbeta;
 }
 
+void vabc_to_vdq(float va, float vb, float vc, float sin_theta, float cos_theta, float *vd, float *vq) {
+    float v0 = (va + vb + vc) * 0.3333333f;  // 1/3
+    float v_alpha = va - v0;
+    float v_beta = ONE_BY_SQRT3 * (vb - vc);
+    
+    *vd = v_alpha * cos_theta + v_beta * sin_theta;
+    *vq = v_beta * cos_theta - v_alpha * sin_theta;
+}
+
 /**
  * @brief Space Vector PWM Modulation
  * @param valpha Alpha component of voltage vector

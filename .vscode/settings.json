@@ -1,4 +1,8 @@
 {
+    "C_Cpp.intelliSenseEngine": "default",
+    "C_Cpp.errorSquiggles": "enabled",
+    "C_Cpp.intelliSenseEngineFallback": "Enabled",
+
     "files.associations": {
         "math.h": "c",
         "arm_math.h": "c",
