@@ -15,6 +15,9 @@
         "pid_utils.h": "c",
         "foc_utils.h": "c",
         "foc_math.h": "c",
-        "sstream": "c"
+        "sstream": "c",
+        "controller_app.h": "c",
+        "array": "c",
+        "string_view": "c"
     }
 }

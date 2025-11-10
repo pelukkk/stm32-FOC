@@ -11,9 +11,15 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 - Clarke & Park Transforms  
 - Position feedback via AS5047 encoder  
 - Phase current sampling via ADC  
-- PI current controller  
 - SVPWM (Space Vector PWM) generation  
-- USB CDC interface for real-time tuning  
+- Torque Control
+- Speed Control
+- Position Control
+- Encoder auto callibration
+- Self-Commissioning for PI Gain current controller auto tuning
+- Sensorless mode using Sliding Mode Observer (SMO)
+- USB CDC interface for real-time tuning and monitoring  
+- Save configuration to flash memory
 - Interrupt-driven timing and FreeRTOS tasking  
 
 ---
@@ -31,6 +37,13 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 ---
 
 ## UPDATE LOG
+
+11-11-2025
+- Add sensorless mode using Sliding Mode Observer (SMO)
+- Dynamic max output PI controller Id Iq based on Vbus
+- Save Rs, Ld, Lq to flash memory
+- Move parse CLI code to controller_app
+
 30-10-2025
 - change algorithm to estimate resistance using constant voltage (vd)
 

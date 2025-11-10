@@ -51,14 +51,16 @@ typedef struct {
     dir_mode_t dir;
 	float gear_ratio;
 
+    float Rs;
+    float Ld;
+    float Lq;
+
     uint8_t valid_EOF;
 }motor_config_t;
 
-extern motor_config_t m_config;
-
-HAL_StatusTypeDef save_config_to_flash(motor_config_t *data);
-void read_config_from_flash(motor_config_t *data);
-void default_config(motor_config_t *data);
-void calc_torque_control_param(void);
+HAL_StatusTypeDef flash_save_config(motor_config_t *data);
+void flash_read_config(motor_config_t *data);
+void flash_default_config(motor_config_t *data);
+void flash_auto_tuning_torque_control(motor_config_t *data);
 
 #endif

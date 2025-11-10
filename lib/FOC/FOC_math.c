@@ -51,6 +51,19 @@ void pre_calc_sin_cos(float theta, float *sin_theta, float *cos_theta) {
     *cos_theta = fast_cos(theta);
 }
 
+
+void clarke_transform(float ia, float ib, float *i_alpha, float *i_beta) {
+    // Clarke transform
+    *i_alpha = ia;
+    *i_beta  = ONE_BY_SQRT3 * ia + TWO_BY_SQRT3 * ib;
+}
+
+void park_transform(float i_alpha, float i_beta, float sin_theta, float cos_theta, float *id, float *iq) {
+    // Park transform
+    *id = i_alpha * cos_theta + i_beta * sin_theta;
+    *iq = i_beta * cos_theta - i_alpha * sin_theta;
+}
+
 // Fast combined Clarke + Park Transform
 void clarke_park_transform(float ia, float ib, float sin_theta, float cos_theta, float *id, float *iq) {
     // Clarke transform

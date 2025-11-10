@@ -16,6 +16,7 @@ typedef struct {
     float kd;        // Differential gain
     float integral;  // Integral accumulator
     float out_max;   // Output upper limit (clamp)
+    float out_max_dynamic;
     float ts;
     float e_deadband;
     float last_error;
@@ -25,7 +26,7 @@ typedef struct {
 float pi_control(PID_Controller_t *pi, float error);
 float pd_control(PID_Controller_t *pd, float error);
 float pid_control(PID_Controller_t *pid, float error);
-void pid_reset_integrator(PID_Controller_t *pid);
+void pid_reset(PID_Controller_t *p);
 void pid_init(PID_Controller_t *pid, float kp, float ki, float kd, float Ts, float out_max, float deadband);
 
 #endif /* PID_INC_PID_UTILS_H_ */

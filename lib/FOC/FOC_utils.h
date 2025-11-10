@@ -11,6 +11,7 @@
 #include <stdint.h>
 #include "FOC_math.h"
 #include "pid_utils.h"
+#include "sliding_mode_observer.h"
 
 #define ERROR_LUT_SIZE (1024)
 
@@ -42,6 +43,7 @@ typedef enum {
 	CALIBRATION_MODE,
 	AUDIO_MODE,
 	TEST_MODE,
+	POWER_UP_MODE,
 }motor_mode_t;
 
 typedef enum {
@@ -51,6 +53,16 @@ typedef enum {
 typedef enum {
   RS, LD, LQ
 }inject_taregt_t;
+
+typedef enum {
+	MOTOR_STATE_IDLE,
+	MOTOR_STATE_STARTUP,
+	MOTOR_STATE_CLOSE_LOOP
+}motor_state_t;
+
+typedef enum {
+	STARTUP_IDLE, STARTUP_ALIGN, STARTUP_OPEN_LOOP_RAMP
+}startup_state_t;
 
 typedef struct {
 	uint8_t pole_pairs;
@@ -71,10 +83,14 @@ typedef struct {
 	float e_angle_rad; // electrical angle
 	float e_angle_rad_comp; // electrical angle
 	float m_angle_offset;
+	float e_rad;
+	float e_angle_rad_smo;
 
 	float vd, vq;
 	float id, iq;
 	float id_filtered, iq_filtered;
+	float v_alpha, v_beta;
+	float i_alpha, i_beta;
 	float va, vb, vc;
 	float ia, ib, ic;
 	float v_bus;
@@ -103,6 +119,12 @@ typedef struct {
 	float gear_ratio;
 	dir_mode_t sensor_dir;
 	float *angle_filtered;
+
+	float startup_timer;
+	float startup_rad;
+	float startup_vd;
+	startup_state_t startup_state;
+	motor_state_t state;
 }foc_t;
 
 void foc_pwm_init(foc_t *hfoc, volatile uint32_t *pwm_a, volatile uint32_t *pwm_b, volatile uint32_t *pwm_c,
@@ -122,5 +144,7 @@ void open_loop_voltage_control(foc_t *hfoc, float vd_ref, float vq_ref, float an
 void meas_inj_dq_process(foc_t *hfoc, float ts);
 void estimate_resistance(foc_t *hfoc);
 void estimate_inductance(foc_t *hfoc, float ts);
+
+int foc_startup_rotor(foc_t *hfoc, smo_t *hsmo, _Bool dir, float dt);
 
 #endif /* FOC_INC_FOC_UTILS_H_ */

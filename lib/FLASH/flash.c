@@ -1,12 +1,7 @@
 #include "flash.h"
 #include <string.h>
 
-motor_config_t m_config;
-
-/* extern from main.c */
-extern foc_t hfoc;
-
-HAL_StatusTypeDef save_config_to_flash(motor_config_t *data) {
+HAL_StatusTypeDef flash_save_config(motor_config_t *data) {
     HAL_StatusTypeDef status;
     FLASH_EraseInitTypeDef EraseInitStruct;
     uint32_t SectorError = 0;
@@ -44,31 +39,31 @@ HAL_StatusTypeDef save_config_to_flash(motor_config_t *data) {
     return HAL_OK;
 }
 
-void read_config_from_flash(motor_config_t *data) {
+void flash_read_config(motor_config_t *data) {
     memcpy(data, (void*)FLASH_SECTOR_ADDR, sizeof(motor_config_t));
 
     // Validasi SOF dan EOF
     if (data->valid_SOF != SOF_FLAG || data->valid_EOF != EOF_FLAG) {
         // set default
-        default_config(data);
+        flash_default_config(data);
     }
 }
 
-void default_config(motor_config_t *data) {
+void flash_default_config(motor_config_t *data) {
     data->id_kp = 0.01f;
     data->id_ki = 12.0f;
-    data->id_out_max = 15.0f;
+    data->id_out_max = 0.8f;
     data->id_e_deadband = 0.0001f;
 
     data->iq_kp = 0.01f;
     data->iq_ki = 12.0f;
-    data->iq_out_max = 15.0f;
+    data->iq_out_max = 0.8f;
     data->iq_e_deadband = 0.0001f;
 
     data->I_ctrl_bandwidth = 50.0f;
 
-    data->speed_kp = 0.05f;
-    data->speed_ki = 0.7f;
+    data->speed_kp = 0.01f;
+    data->speed_ki = 0.1f;
     data->speed_out_max = 10.0f;
     data->speed_e_deadband = 0.01f;
 
@@ -82,30 +77,29 @@ void default_config(motor_config_t *data) {
     data->voffset_b = 1.65f;
 
     data->encd_offset = 0.0f;
-    memset(m_config.encd_error_comp, 0, sizeof(m_config.encd_error_comp));
+    memset(data->encd_error_comp, 0, sizeof(data->encd_error_comp));
 
     data->freq = 10000;
     data->dir = NORMAL_DIR;
     data->gear_ratio = 1.0f;
+
+    data->Rs = 0.26f;
+    data->Ld = 0.000160f;
+    data->Lq = 0.000160f;
 }
 
 
-void calc_torque_control_param(void) {
-  if (hfoc.Rs <= 0.0f || hfoc.Rs > 3.0f ||
-      hfoc.Ld <= 0.0f || hfoc.Ld > 3.0f ||
-      hfoc.Lq <= 0.0f || hfoc.Lq > 3.0f ||
-      hfoc.I_ctrl_bandwidth <= 0.0f)
+void flash_auto_tuning_torque_control(motor_config_t *data) {
+  if (data->Rs <= 0.0f || data->Rs > 3.0f ||
+      data->Ld <= 0.0f || data->Ld > 3.0f ||
+      data->Lq <= 0.0f || data->Lq > 3.0f ||
+      data->I_ctrl_bandwidth <= 0.0f)
       return;
 
-  float omega = TWO_PI * hfoc.I_ctrl_bandwidth;
+  float omega = TWO_PI * data->I_ctrl_bandwidth;
 
-  hfoc.id_ctrl.kp = hfoc.Ld * omega;
-  hfoc.id_ctrl.ki = hfoc.Rs * omega;
-  hfoc.iq_ctrl.kp = hfoc.Lq * omega;
-  hfoc.iq_ctrl.ki = hfoc.Rs * omega;
-
-  m_config.id_kp = hfoc.id_ctrl.kp;
-  m_config.id_ki = hfoc.id_ctrl.ki;
-  m_config.iq_kp = hfoc.iq_ctrl.kp;
-  m_config.iq_ki = hfoc.iq_ctrl.ki;
+  data->id_kp = data->Ld * omega;
+  data->id_ki = data->Rs * omega;
+  data->iq_kp = data->Lq * omega;
+  data->iq_ki = data->Rs * omega;
 }

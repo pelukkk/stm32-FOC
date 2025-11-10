@@ -33,7 +33,7 @@
 #include "CAN.h"
 #include <stdio.h>
 #include <math.h>
-#include "complex.h"
+#include "sliding_mode_observer.h"
 
 /* USER CODE END Includes */
 
@@ -52,12 +52,15 @@
 
 // #define BLDC_PWM_FREQ AUDIO_SAMPLE_RATE
 #define BLDC_PWM_FREQ 10000
-#define R_SHUNT	0.01f
+#define R_SHUNT	0.001f
 #define V_OFFSET_A	1.645f
 #define V_OFFSET_B	1.657f
 #define POLE_PAIR	(7)
 #define SPEED_CONTROL_CYCLE	10
 #define FOC_TS (1.0f / (float)BLDC_PWM_FREQ)
+
+
+#define SENSORLESS_MODE
 
 /* USER CODE END PM */
 
@@ -79,7 +82,9 @@ osThreadId controlTaskHandle;
 osThreadId comTaskHandle;
 /* USER CODE BEGIN PV */
 
+motor_config_t m_config;
 foc_t hfoc;
+smo_t hsmo;
 DRV8302_t bldc;
 AS5047P_t hencd;
 
@@ -109,7 +114,7 @@ void StartControlTask(void const * argument);
 void StartComTask(void const * argument);
 
 /* USER CODE BEGIN PFP */
-extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -117,22 +122,54 @@ extern uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len);
 
 /******************************************************************************/
 
-void bldc_config(DRV8302_t *hbldc) {
-  DRV8302_GPIO_MPWM_config(hbldc, M_PWM_GPIO_Port, M_PWM_Pin);
-  DRV8302_GPIO_MOC_config(hbldc, M_OC_GPIO_Port, M_OC_Pin);
-  DRV8302_GPIO_GAIN_config(hbldc, GAIN_GPIO_Port, GAIN_Pin);
-  DRV8302_GPIO_DCCAL_config(hbldc, DC_CAL_GPIO_Port, DC_CAL_Pin);
-  DRV8302_GPIO_OCTW_config(hbldc, OCTW_GPIO_Port, OCTW_Pin);
-  DRV8302_GPIO_FAULT_config(hbldc, FAULT_GPIO_Port, FAULT_Pin);
-  DRV8302_GPIO_ENGATE_config(hbldc, EN_GATE_GPIO_Port, EN_GATE_Pin);
-  DRV8302_TIMER_config(hbldc, &htim1, BLDC_PWM_FREQ);
-  DRV8302_current_sens_config(hbldc, _10VPV, R_SHUNT, V_OFFSET_A, V_OFFSET_B);
-  DRV8302_set_mode(hbldc, _6_PWM_MODE, _CYCLE_MODE);
+void bldc_init(void) {
+  DRV8302_GPIO_MPWM_config(&bldc, M_PWM_GPIO_Port, M_PWM_Pin);
+  DRV8302_GPIO_MOC_config(&bldc, M_OC_GPIO_Port, M_OC_Pin);
+  DRV8302_GPIO_GAIN_config(&bldc, GAIN_GPIO_Port, GAIN_Pin);
+  DRV8302_GPIO_DCCAL_config(&bldc, DC_CAL_GPIO_Port, DC_CAL_Pin);
+  DRV8302_GPIO_OCTW_config(&bldc, OCTW_GPIO_Port, OCTW_Pin);
+  DRV8302_GPIO_FAULT_config(&bldc, FAULT_GPIO_Port, FAULT_Pin);
+  DRV8302_GPIO_ENGATE_config(&bldc, EN_GATE_GPIO_Port, EN_GATE_Pin);
+  DRV8302_TIMER_config(&bldc, &htim1, BLDC_PWM_FREQ);
+  DRV8302_current_sens_config(&bldc, _40VPV, R_SHUNT, V_OFFSET_A, V_OFFSET_B);
+  DRV8302_set_mode(&bldc, _6_PWM_MODE, _CYCLE_MODE);
 
-  DRV8302_init(hbldc);
+  DRV8302_init(&bldc);
 
-  DRV8302_disable_dc_cal(hbldc);
-  DRV8302_enable_gate(hbldc);
+  DRV8302_disable_dc_cal(&bldc);
+  DRV8302_enable_gate(&bldc);
+  
+}
+
+void control_init(void) {
+  hfoc.angle_filtered = &hencd.angle_filtered;
+  foc_set_torque_control_bandwidth(&hfoc, m_config.I_ctrl_bandwidth);
+
+  hfoc.id_ctrl.out_max_dynamic = m_config.id_out_max;
+  hfoc.iq_ctrl.out_max_dynamic = m_config.iq_out_max;
+  pid_init(&hfoc.id_ctrl, m_config.id_kp, m_config.id_ki, 0.0f, FOC_TS, 10.0f, m_config.id_e_deadband);
+  pid_init(&hfoc.iq_ctrl, m_config.iq_kp, m_config.iq_ki, 0.0f, FOC_TS, 10.0f, m_config.iq_e_deadband);
+
+  pid_init(&hfoc.speed_ctrl, m_config.speed_kp, m_config.speed_ki, 0.0f, FOC_TS * SPEED_CONTROL_CYCLE, m_config.speed_out_max, m_config.speed_e_deadband);
+  pid_init(&hfoc.pos_ctrl, m_config.pos_kp, m_config.pos_ki, m_config.pos_kd, FOC_TS * SPEED_CONTROL_CYCLE, m_config.pos_out_max, m_config.pos_e_deadband);
+  
+  foc_pwm_init(&hfoc, &(TIM1->CCR3), &(TIM1->CCR2), &(TIM1->CCR1), bldc.pwm_resolution);
+  foc_motor_init(&hfoc, POLE_PAIR, 360);
+
+  foc_sensor_init(&hfoc, m_config.encd_offset, REVERSE_DIR);
+  foc_gear_reducer_init(&hfoc, 1.0f);
+  foc_set_limit_current(&hfoc, 20.0);
+  
+  float Rs = m_config.Rs;
+  float Ls = (m_config.Ld + m_config.Lq) / 2.0f;
+  smo_init(&hsmo, Rs, Ls, POLE_PAIR, FOC_TS);
+}
+
+void magnetic_encoder_init(void) {
+  AS5047P_config(&hencd, &hspi1, SPI_CS_GPIO_Port, SPI_CS_Pin);
+  AS5047P_start(&hencd);
+  HAL_Delay(10);
+  AS5047P_start(&hencd);
 }
 
 /******************************************************************************/
@@ -180,9 +217,17 @@ uint32_t get_dt_us(void) {
 
 /******************************************************************************/
 
-int measure_R(float vdc) {
-  char usb_buff[128];
+void start_measure(inject_taregt_t target) {
+  hfoc.meas_inj_target = target;
+  osDelay(100);
+  hfoc.meas_inj_start_flag = 1;
+  // waiting process
+  while(hfoc.meas_inj_start_flag) {
+    osDelay(1);
+  }
+}
 
+int measure_R(float vdc) {
   if (hfoc.v_bus  < 10.0f) {
     return -1;
   }
@@ -192,39 +237,18 @@ int measure_R(float vdc) {
   memset(Vd_buff, 0, sizeof(Vd_buff));
   memset(Id_buff, 0, sizeof(Id_buff));
 
-  hfoc.meas_inj_target = RS;
-  osDelay(100);
-  hfoc.meas_inj_start_flag = 1;
-  // waiting process
-  while(hfoc.meas_inj_start_flag) {
-    osDelay(1);
-  }
-  
+  start_measure(RS);
   estimate_resistance(&hfoc);
+  m_config.Rs = hfoc.Rs;
 
-#if 0
-  for (int i = 0; i < MAX_I_SAMPLE; i++) {
-    float buffer_val[2] = {
-      Vd_buff[i],
-      Id_buff[i]
-    };
-    send_data_float(buffer_val, 2);
-    osDelay(1);
-  }
-#endif
-
-  snprintf(usb_buff, sizeof(usb_buff), 
-          "Estimate Resistance @(V=%.2f)\r\n"
-          "Rs: %f\r\n\r\n",
-          hfoc.meas_inj_amp, hfoc.Rs);
-  CDC_Transmit_FS((uint8_t*)usb_buff, sizeof(usb_buff));
-
+  usb_print("Estimate Resistance @(V=%.2f)\r\n"
+            "Rs: %f\r\n\r\n",
+            hfoc.meas_inj_amp, hfoc.Rs);
+  
   return 0;
 }
 
 int measure_L(float f, float amp) {
-  char usb_buff[128];
-
   if (hfoc.v_bus  < 10.0f) {
     return -1;
   }
@@ -238,23 +262,11 @@ int measure_L(float f, float amp) {
   memset(Vq_buff, 0, sizeof(Vq_buff));
   memset(Iq_buff, 0, sizeof(Iq_buff));
 
-  hfoc.meas_inj_target = LD;
-  osDelay(100);
-  hfoc.meas_inj_start_flag = 1;
-  // waiting process
-  while(hfoc.meas_inj_start_flag) {
-    osDelay(1);
-  }
-
-  hfoc.meas_inj_target = LQ;
-  osDelay(100);
-  hfoc.meas_inj_start_flag = 1;
-  // waiting process
-  while(hfoc.meas_inj_start_flag) {
-    osDelay(1);
-  }
-
+  start_measure(LD);
+  start_measure(LQ);
   estimate_inductance(&hfoc, FOC_TS);
+  m_config.Ld = hfoc.Ld;
+  m_config.Lq = hfoc.Lq;
 
   for (int i = 0; i < MAX_I_SAMPLE; i++) {
     float buffer_val[4] = {
@@ -265,12 +277,10 @@ int measure_L(float f, float amp) {
     osDelay(1);
   }
   
-  snprintf(usb_buff, sizeof(usb_buff), 
-          "Estimate Inductance @(f=%.2fHz)\r\n"
-          "Ld: %f\r\n"
-          "Lq: %f\r\n\r\n", 
-          hfoc.meas_inj_freq, hfoc.Rs, hfoc.Ld, hfoc.Lq);
-  CDC_Transmit_FS((uint8_t*)usb_buff, sizeof(usb_buff));
+  usb_print("Estimate Inductance @(f=%.2fHz)\r\n"
+            "Ld: %f\r\n"
+            "Lq: %f\r\n\r\n", 
+            hfoc.meas_inj_freq, hfoc.Ld, hfoc.Lq);
 
   return 0;
 }
@@ -317,12 +327,16 @@ void test_bw_get_sample(void) {
 }
 
 /******************************************************************************/
-float elec_rad_test = 0.0f;
 
-void svpwm_test(void) {
-  open_loop_voltage_control(&hfoc, 0.0f, 0.3f, elec_rad_test);
-  elec_rad_test += 0.01;
-  if (elec_rad_test > TWO_PI) elec_rad_test = 0.0f;
+void test_openloop(void) {
+  open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, 0);
+  HAL_Delay(2000);
+
+  for (float i = 0; i < 2*PI*hfoc.pole_pairs; i+=0.1) {
+    open_loop_voltage_control(&hfoc, VD_CAL, VQ_CAL, i);
+    HAL_Delay(1);
+  }
+  open_loop_voltage_control(&hfoc, 0, 0, 0);
 }
 
 /******************************************************************************/
@@ -379,46 +393,25 @@ int main(void)
   printf("FPU tidak aktif!\n");
 #endif
 
-  read_config_from_flash(&m_config);
-
+  flash_read_config(&m_config);
   init_trig_lut();
-  
-  hfoc.angle_filtered = &hencd.angle_filtered;
-  foc_set_torque_control_bandwidth(&hfoc, m_config.I_ctrl_bandwidth);
-  pid_init(&hfoc.id_ctrl, m_config.id_kp, m_config.id_ki, 0.0f, FOC_TS, m_config.id_out_max, m_config.id_e_deadband);
-  pid_init(&hfoc.iq_ctrl, m_config.iq_kp, m_config.iq_ki, 0.0f, FOC_TS, m_config.iq_out_max, m_config.iq_e_deadband);
-  pid_init(&hfoc.speed_ctrl, m_config.speed_kp, m_config.speed_ki, 0.0f, FOC_TS * SPEED_CONTROL_CYCLE, m_config.speed_out_max, m_config.speed_e_deadband);
-  pid_init(&hfoc.pos_ctrl, m_config.pos_kp, m_config.pos_ki, m_config.pos_kd, FOC_TS * SPEED_CONTROL_CYCLE, m_config.pos_out_max, m_config.pos_e_deadband);
-
+  bldc_init();
+  control_init();
   CAN_init(&hcan1);
-
-  AS5047P_config(&hencd, &hspi1, SPI_CS_GPIO_Port, SPI_CS_Pin);
-  AS5047P_start(&hencd);
-  HAL_Delay(10);
-  AS5047P_start(&hencd);
-
-  bldc_config(&bldc);
+#ifndef SENSORLESS_MODE
+  magnetic_encoder_init();
+#endif
 	// current sensor
 	HAL_ADCEx_InjectedStart_IT(&hadc1);
 	HAL_ADCEx_InjectedStart_IT(&hadc2);
 	// voltage sensor
 	HAL_ADCEx_InjectedStart_IT(&hadc3);
 
-  foc_pwm_init(&hfoc, &(TIM1->CCR3), &(TIM1->CCR2), &(TIM1->CCR1), bldc.pwm_resolution);
-  foc_motor_init(&hfoc, POLE_PAIR, 360);
-
-  foc_sensor_init(&hfoc, m_config.encd_offset, REVERSE_DIR);
-  foc_gear_reducer_init(&hfoc, 1.0f);
-  foc_set_limit_current(&hfoc, 10.0);
-
   HAL_TIM_Base_Start(&htim10);
 
-  // hfoc.control_mode = POSITION_CONTROL_MODE;
-  // encoder_get_error();
-  hfoc.control_mode = TORQUE_CONTROL_MODE;
-  // hfoc.control_mode = AUDIO_MODE;
-
-  // kp=4.5 kd=0.3
+  // anti-shock at startup
+  hfoc.control_mode = POWER_UP_MODE;
+  open_loop_voltage_control(&hfoc, 0.0f, 0.0f, 0.0f);
 
   for (int i = 0; i < 5; i++) {
     LED_GPIO_Port->BSRR = LED_Pin;
@@ -426,6 +419,8 @@ int main(void)
     LED_GPIO_Port->BSRR = LED_Pin<<16;
     HAL_Delay(50);
   }
+  // default mode
+  hfoc.control_mode = TORQUE_CONTROL_MODE;
 
   /* USER CODE END 2 */
 
@@ -1030,15 +1025,11 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
-uint32_t dt_us;
-
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi) {
 	if (hspi->Instance == SPI1) {
     angle_deg = AS5047P_get_degree(&hencd);
     foc_calc_electric_angle(&hfoc, DEG_TO_RAD(angle_deg));
     AS5047P_set_val_flag();
-
-    // HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
 	}
 }
 
@@ -1052,10 +1043,12 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
 	if (hadc->Instance == ADC3) {
     static uint8_t event_loop_count = 0;
 
+#ifndef SENSORLESS_MODE
     if (AS5047P_get_val_flag()) {
       AS5047P_reset_val_flag();
       AS5047P_start(&hencd);
     }
+#endif
 
     hfoc.v_bus = get_power_voltage();
     // get_v_phase(&hfoc);
@@ -1065,15 +1058,80 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
       case SPEED_CONTROL_MODE:
       case POSITION_CONTROL_MODE: {
         DRV8302_get_current(&bldc, &hfoc.ia, &hfoc.ib);
+
+#ifdef SENSORLESS_MODE
+        static _Bool align_dir = 0;
+        switch (hfoc.state) {
+          case MOTOR_STATE_IDLE: {
+            smo_update_arctan(&hsmo, hfoc.v_alpha, hfoc.v_beta, hfoc.i_alpha, hfoc.i_beta);
+            hfoc.e_rad = smo_get_rotor_angle(&hsmo);
+            foc_current_control_update(&hfoc);
+
+            if (hfoc.control_mode == TORQUE_CONTROL_MODE) {
+              if (fabs(hfoc.iq_ref) > 0.05) {
+                if (hfoc.iq_ref > 0) align_dir = 0;
+                else align_dir = 1;
+                hsmo.min_operating_emf = 0.005f;
+                hfoc.state = MOTOR_STATE_STARTUP;
+              }
+            }
+            else if (hfoc.control_mode == SPEED_CONTROL_MODE) {
+              if (fabs(sp_input) > 150.0f) {
+                if (sp_input > 0) align_dir = 1;
+                else align_dir = 0;
+                smo_set_min_emf(&hsmo, 0.1f);
+                hfoc.state = MOTOR_STATE_STARTUP;
+              }
+            }
+            break;
+          }
+          case MOTOR_STATE_STARTUP:
+            if (foc_startup_rotor(&hfoc, &hsmo, align_dir, FOC_TS) == 1) {
+              pid_reset(&hfoc.id_ctrl);
+              pid_reset(&hfoc.iq_ctrl);
+              pid_reset(&hfoc.speed_ctrl);
+              smo_set_min_emf(&hsmo, 0.2f);
+              hfoc.state = MOTOR_STATE_CLOSE_LOOP;
+            }
+            break;
+          case MOTOR_STATE_CLOSE_LOOP: {
+            _Bool smo_ret = smo_update_arctan(&hsmo, hfoc.v_alpha, hfoc.v_beta, hfoc.i_alpha, hfoc.i_beta);
+            // float abs_rpm = fabs(smo_get_rotor_speed(&hsmo));
+            if (smo_ret == 0 
+              // || abs_rpm < 10.0f
+            ) {
+              hfoc.state = MOTOR_STATE_IDLE;
+              if (hfoc.control_mode == SPEED_CONTROL_MODE) {
+                hfoc.iq_ref = 0;
+              }
+              break;
+            }
+            hfoc.e_rad = smo_get_rotor_angle(&hsmo);
+            foc_current_control_update(&hfoc);
+            break;
+          }
+        }
+        
+        if (event_loop_count > SPEED_CONTROL_CYCLE) {
+          event_loop_count = 0;
+          hfoc.actual_rpm = -smo_get_rotor_speed(&hsmo);
+          foc_set_flag();
+        }
+        event_loop_count++;
+#else
+        hfoc.e_rad = hfoc.e_angle_rad_comp;
         foc_current_control_update(&hfoc);
+        //debug
+        smo_update_arctan(&hsmo, hfoc.v_alpha, hfoc.v_beta, hfoc.i_alpha, hfoc.i_beta);
 
         if (event_loop_count > SPEED_CONTROL_CYCLE) {
           event_loop_count = 0;
-          dt_us = get_dt_us();
+          uint32_t dt_us = get_dt_us();
           hfoc.actual_rpm = AS5047P_get_rpm(&hencd, dt_us);
           foc_set_flag();
         }
         event_loop_count++;
+#endif
         break;
       }
       case AUDIO_MODE: {
@@ -1108,6 +1166,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
 void StartControlTask(void const * argument)
 {
   /* USER CODE BEGIN 5 */
+  uint32_t blink_tick = 0;
   /* Infinite loop */
   for(;;)
   {
@@ -1120,13 +1179,35 @@ void StartControlTask(void const * argument)
         hfoc.iq_ref = sp_input;
         break;
       case SPEED_CONTROL_MODE: {
+#ifdef SENSORLESS_MODE
+        if (hfoc.state == MOTOR_STATE_CLOSE_LOOP) {
+          static float sp_rpm = 0.0f;
+          const float acc_rpm = 5.0f;
+          const float min_rpm = 200.0f;
+
+          if (fabs(sp_rpm) < min_rpm && fabs(sp_input) >= min_rpm) {
+            if (sp_input > 0) sp_rpm = min_rpm;
+            if (sp_input < 0) sp_rpm = -min_rpm;
+          }
+          if (sp_input > sp_rpm) {
+            sp_rpm += acc_rpm;
+          }
+          else if (sp_input < sp_rpm) {
+            sp_rpm -= acc_rpm;
+          }
+          foc_speed_control_update(&hfoc, sp_rpm);
+        }
+#else
         foc_speed_control_update(&hfoc, sp_input);
+#endif
         break;
       }
+#ifndef SENSORLESS_MODE
       case POSITION_CONTROL_MODE:
         hfoc.actual_angle = AS5047P_get_actual_degree(&hencd) * hfoc.gear_ratio;
         foc_position_control_update(&hfoc, test_angle_sp);
         break;
+#endif
       case CALIBRATION_MODE:
         break;
       default:
@@ -1136,14 +1217,21 @@ void StartControlTask(void const * argument)
     
     if (hfoc.control_mode == CALIBRATION_MODE) {
       if (start_cal == 1) {
+#ifndef SENSORLESS_MODE
         foc_cal_encoder(&hfoc);
+#endif
 
         measure_R(1.0f);
         measure_L(400.0f, 1.0f);
-        // measure_L(392.0f, 1.0f);
-        // measure_L(440.0f, 1.0f);
-        // measure_L(493.9f, 1.0f);
-        calc_torque_control_param();
+
+#ifdef SENSORLESS_MODE
+        smo_update_R_L(&hsmo, m_config.Rs, (m_config.Ld + m_config.Ld) * 0.5);
+#endif
+        flash_auto_tuning_torque_control(&m_config);
+        hfoc.id_ctrl.kp = m_config.id_kp;
+        hfoc.id_ctrl.ki = m_config.id_ki;
+        hfoc.iq_ctrl.kp = m_config.iq_kp;
+        hfoc.iq_ctrl.ki = m_config.iq_ki;
 
         start_cal = 0;
       }
@@ -1153,6 +1241,11 @@ void StartControlTask(void const * argument)
         test_bandwidth();
         test_bw_flag = 0;
       }
+    }
+
+    if (HAL_GetTick() - blink_tick >= 500) {
+      blink_tick = HAL_GetTick();
+      HAL_GPIO_TogglePin(LED_GPIO_Port, LED_Pin);
     }
     osDelay(1);
   }
@@ -1178,14 +1271,13 @@ void StartComTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
-    if (HAL_GetTick() - debug_tick >= 10) {
+    if (HAL_GetTick() - debug_tick >= 2) {
       debug_tick = HAL_GetTick();
       float data[16];
       uint16_t len = 0;
 
       switch (hfoc.control_mode) {
       case TORQUE_CONTROL_MODE:
-        // data[len++] = hfoc.e_angle_rad_comp;
         data[len++] = sp_input;
         data[len++] = hfoc.id_filtered;
         data[len++] = hfoc.iq_filtered;
@@ -1195,16 +1287,17 @@ void StartComTask(void const * argument)
         data[len++] = hfoc.actual_rpm;
         break;
       case POSITION_CONTROL_MODE:
-        data[len++] = sp_input;//test_angle_sp;
+        data[len++] = sp_input;
         data[len++] = hfoc.actual_angle;
-        // data[len++] = hfoc.iq;
         break;
       case AUDIO_MODE:
         data[len++] = v_tone;
         break;
       case CALIBRATION_MODE:
-        // data[len++] = hencd.prev_raw_angle;
-        // data[len++] = hencd.angle_filtered;
+#ifndef SENSORLESS_MODE
+        data[len++] = hencd.prev_raw_angle;
+        data[len++] = hencd.angle_filtered;
+#endif
         break;
       case TEST_MODE:
         // data[len++] = hfoc.v_bus;
@@ -1212,6 +1305,8 @@ void StartComTask(void const * argument)
         data[len++] = hfoc.ib;
         data[len++] = hfoc.actual_angle;
         break;
+      default:
+      break;
       }
 
       send_data_float(data, len);

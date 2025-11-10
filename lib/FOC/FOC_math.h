@@ -37,6 +37,8 @@ float fast_sin(float theta);
 float fast_cos(float theta);
 void pre_calc_sin_cos(float theta, float *sin_theta, float *cos_theta);
 
+void clarke_transform(float ia, float ib, float *i_alpha, float *i_beta);
+void park_transform(float i_alpha, float i_beta, float sin_theta, float cos_theta, float *id, float *iq);
 void clarke_park_transform(float ia, float ib, float sin_theta, float cos_theta, float *id, float *iq);
 void inverse_park_transform(float vd, float vq, float sin_theta, float cos_theta, float *valpha, float *vbeta);
 void inverse_clarke_transform(float valpha, float vbeta, float *va, float *vb, float *vc);
