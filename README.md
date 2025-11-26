@@ -38,7 +38,7 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 
 ## UPDATE LOG
 
-11-26-2025
+26-11-2025
 - Add sensorless mode using High Frequency Injection (HFI)
 - Hysteresis switching between SMO and HFI
 
