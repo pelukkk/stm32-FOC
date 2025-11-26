@@ -73,7 +73,10 @@ float pid_control(PID_Controller_t *pid, float error) {
 
     float p_term = pid->kp * error;
 
-    float d_term = pid->kd / pid->ts * (error - pid->last_error);
+    float error_derivative = (error - pid->last_error) / pid->ts;
+    pid->d_filtered = (1.0f - pid->d_alpha_filter) * pid->d_filtered + pid->d_alpha_filter * error_derivative;
+    float d_term = pid->d_filtered * pid->kd;
+    // float d_term = pid->kd / pid->ts * (error - pid->last_error);
     pid->last_error = error;
 
     float new_integral = pid->integral + error * pid->ki * pid->ts;

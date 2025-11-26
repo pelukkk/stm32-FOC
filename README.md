@@ -17,7 +17,7 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 - Position Control
 - Encoder auto callibration
 - Self-Commissioning for PI Gain current controller auto tuning
-- Sensorless mode using Sliding Mode Observer (SMO)
+- Sensorless mode using Sliding Mode Observer (SMO) & High Frequency Injection (HFI)
 - USB CDC interface for real-time tuning and monitoring  
 - Save configuration to flash memory
 - Interrupt-driven timing and FreeRTOS tasking  
@@ -37,6 +37,10 @@ Built using **PlatformIO**, **STM32 HAL/LL drivers**, and **FreeRTOS**, this pro
 ---
 
 ## UPDATE LOG
+
+11-26-2025
+- Add sensorless mode using High Frequency Injection (HFI)
+- Hysteresis switching between SMO and HFI
 
 11-11-2025
 - Add sensorless mode using Sliding Mode Observer (SMO)

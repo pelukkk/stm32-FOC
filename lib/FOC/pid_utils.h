@@ -20,6 +20,8 @@ typedef struct {
     float ts;
     float e_deadband;
     float last_error;
+    float d_alpha_filter; // Derivative filter coefficient
+    float d_filtered;
     float mv;
 } PID_Controller_t;
 

@@ -10,8 +10,8 @@
 
 #include "stm32f4xx_hal.h"
 
-#define RECEIVER_ID 0x01
-#define TRANSMITTER_ID 0x02
+#define RECEIVER_ID 0x02
+#define TRANSMITTER_ID 0x01
 
 /* Extern variable */
 extern float test_angle_sp;

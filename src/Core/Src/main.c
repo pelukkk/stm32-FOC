@@ -150,8 +150,10 @@ void control_init(void) {
   pid_init(&hfoc.id_ctrl, m_config.id_kp, m_config.id_ki, 0.0f, FOC_TS, 10.0f, m_config.id_e_deadband);
   pid_init(&hfoc.iq_ctrl, m_config.iq_kp, m_config.iq_ki, 0.0f, FOC_TS, 10.0f, m_config.iq_e_deadband);
 
-  pid_init(&hfoc.speed_ctrl, m_config.speed_kp, m_config.speed_ki, 0.0f, FOC_TS * SPEED_CONTROL_CYCLE, m_config.speed_out_max, m_config.speed_e_deadband);
+  pid_init(&hfoc.speed_ctrl, m_config.speed_kp, m_config.speed_ki, 0.0001f, FOC_TS * SPEED_CONTROL_CYCLE, m_config.speed_out_max, m_config.speed_e_deadband);
+  hfoc.speed_ctrl.d_alpha_filter = 0.01f;
   pid_init(&hfoc.pos_ctrl, m_config.pos_kp, m_config.pos_ki, m_config.pos_kd, FOC_TS * SPEED_CONTROL_CYCLE, m_config.pos_out_max, m_config.pos_e_deadband);
+  hfoc.pos_ctrl.d_alpha_filter = 0.85;
   
   foc_pwm_init(&hfoc, &(TIM1->CCR3), &(TIM1->CCR2), &(TIM1->CCR1), bldc.pwm_resolution);
   foc_motor_init(&hfoc, POLE_PAIR, 360);
@@ -160,9 +162,17 @@ void control_init(void) {
   foc_gear_reducer_init(&hfoc, 1.0f);
   foc_set_limit_current(&hfoc, 20.0);
   
+  hfoc.Ld = m_config.Ld;
+  hfoc.Lq = m_config.Lq;
   float Rs = m_config.Rs;
-  float Ls = (m_config.Ld + m_config.Lq) / 2.0f;
+  float Ls = (hfoc.Ld + hfoc.Lq) / 2.0f;
   smo_init(&hsmo, Rs, Ls, POLE_PAIR, FOC_TS);
+
+  // HFI parameter
+  const float vh = 1.2f; // injection amplitude
+  const float fh = 1000.0f; // injection frequency
+  const float lpf_fc = 200.0f; // cut-off frequency LPF
+  foc_hfi_init(&hfoc, vh, fh, lpf_fc, FOC_TS);
 }
 
 void magnetic_encoder_init(void) {
@@ -411,7 +421,6 @@ int main(void)
 
   // anti-shock at startup
   hfoc.control_mode = POWER_UP_MODE;
-  open_loop_voltage_control(&hfoc, 0.0f, 0.0f, 0.0f);
 
   for (int i = 0; i < 5; i++) {
     LED_GPIO_Port->BSRR = LED_Pin;
@@ -419,6 +428,7 @@ int main(void)
     LED_GPIO_Port->BSRR = LED_Pin<<16;
     HAL_Delay(50);
   }
+  HAL_Delay(500);
   // default mode
   hfoc.control_mode = TORQUE_CONTROL_MODE;
 
@@ -1025,6 +1035,82 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE BEGIN 4 */
 
+static int torque_control_update(void) {
+  int ret = 0;
+  static uint8_t event_speed_loop_count = 0;
+  DRV8302_get_current(&bldc, &hfoc.ia, &hfoc.ib);
+
+#ifdef SENSORLESS_MODE
+  static float rpm_temp = 0.0f;
+  switch (hfoc.state) {
+    case MOTOR_STATE_HFI: {
+      smo_update_arctan(&hsmo, hfoc.v_alpha, hfoc.v_beta, hfoc.i_alpha, hfoc.i_beta);
+
+      hfoc.e_rad = hfoc.pll.theta_est;
+      rpm_temp += (hfoc.pll.omega_est * 60.0 / TWO_PI) / POLE_PAIR;
+      foc_current_control_update_hfi(&hfoc, FOC_TS);
+      if (fabsf(hfoc.actual_rpm) > 300) {
+        // smo_reset(&hsmo);
+        hfoc.state = MOTOR_STATE_SMO;
+      }
+      break;
+    }
+    case MOTOR_STATE_SMO: {
+      _Bool smo_ret = smo_update_arctan(&hsmo, hfoc.v_alpha, hfoc.v_beta, hfoc.i_alpha, hfoc.i_beta);
+      // float abs_rpm = fabs(smo_get_rotor_speed(&hsmo));
+      if (smo_ret == 0) {
+        hfoc.state = MOTOR_STATE_HFI;
+        break;
+      }
+      hfoc.e_rad = smo_get_rotor_angle(&hsmo);
+      hfoc.pll.theta_est = hfoc.e_rad;
+      rpm_temp += smo_get_rotor_speed(&hsmo);
+      foc_current_control_update_hfi(&hfoc, FOC_TS);
+      break;
+    }
+  }
+  
+  // calc mechanical angle
+  static float last_e_rad = 0.0f;
+  static float rad_ovf = 0.0f;
+  float angle_diff = hfoc.e_rad - last_e_rad;
+  last_e_rad = hfoc.e_rad;
+
+  if (angle_diff < -PI) {
+    rad_ovf += 1.0f;
+  }
+  else if (angle_diff > PI) {
+    rad_ovf -= 1.0f;
+  }
+  float total_e_angle = hfoc.e_rad + rad_ovf * TWO_PI;
+  float mechanical_angle_deg = RAD_TO_DEG(total_e_angle) / POLE_PAIR;
+  hfoc.actual_angle = mechanical_angle_deg;
+
+  if (event_speed_loop_count >= SPEED_CONTROL_CYCLE) {
+    hfoc.actual_rpm = (rpm_temp / (float)SPEED_CONTROL_CYCLE);
+    rpm_temp = 0;
+    event_speed_loop_count = 0;
+    foc_set_flag();
+    ret = 1;
+  }
+  event_speed_loop_count++;
+#else
+  hfoc.e_rad = hfoc.e_angle_rad_comp;
+  foc_current_control_update(&hfoc);
+
+  if (event_speed_loop_count > SPEED_CONTROL_CYCLE) {
+    event_speed_loop_count = 0;
+    uint32_t dt_us = get_dt_us();
+    float rpm_encd = AS5047P_get_rpm(&hencd, dt_us);
+    foc_calc_mech_rpm_encoder(&hfoc, rpm_encd);
+    foc_set_flag();
+    ret = 1;
+  }
+  event_speed_loop_count++;
+#endif
+  return ret;
+}
+
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi) {
 	if (hspi->Instance == SPI1) {
     angle_deg = AS5047P_get_degree(&hencd);
@@ -1041,7 +1127,6 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
     DRV8302_set_adc_b(&bldc, ADC2->JDR1);
   }
 	if (hadc->Instance == ADC3) {
-    static uint8_t event_loop_count = 0;
 
 #ifndef SENSORLESS_MODE
     if (AS5047P_get_val_flag()) {
@@ -1054,84 +1139,35 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
     // get_v_phase(&hfoc);
     
     switch(hfoc.control_mode) {
-      case TORQUE_CONTROL_MODE:
-      case SPEED_CONTROL_MODE:
+      case TORQUE_CONTROL_MODE: {
+        hfoc.id_ref = 0.0f;
+        hfoc.iq_ref = sp_input;
+        torque_control_update();
+        break;
+      }
+      case SPEED_CONTROL_MODE: {
+        if (torque_control_update() == 1) {
+          static float sp_rpm = 0.0f;
+          const float acc_rpm = 1.0f;
+
+          if (sp_input > sp_rpm) {
+            sp_rpm += acc_rpm;
+          }
+          else if (sp_input < sp_rpm) {
+            sp_rpm -= acc_rpm;
+          }
+          foc_speed_control_update(&hfoc, sp_rpm);
+        }
+        break;
+      }
       case POSITION_CONTROL_MODE: {
-        DRV8302_get_current(&bldc, &hfoc.ia, &hfoc.ib);
-
-#ifdef SENSORLESS_MODE
-        static _Bool align_dir = 0;
-        switch (hfoc.state) {
-          case MOTOR_STATE_IDLE: {
-            smo_update_arctan(&hsmo, hfoc.v_alpha, hfoc.v_beta, hfoc.i_alpha, hfoc.i_beta);
-            hfoc.e_rad = smo_get_rotor_angle(&hsmo);
-            foc_current_control_update(&hfoc);
-
-            if (hfoc.control_mode == TORQUE_CONTROL_MODE) {
-              if (fabs(hfoc.iq_ref) > 0.05) {
-                if (hfoc.iq_ref > 0) align_dir = 0;
-                else align_dir = 1;
-                hsmo.min_operating_emf = 0.005f;
-                hfoc.state = MOTOR_STATE_STARTUP;
-              }
-            }
-            else if (hfoc.control_mode == SPEED_CONTROL_MODE) {
-              if (fabs(sp_input) > 150.0f) {
-                if (sp_input > 0) align_dir = 1;
-                else align_dir = 0;
-                smo_set_min_emf(&hsmo, 0.1f);
-                hfoc.state = MOTOR_STATE_STARTUP;
-              }
-            }
-            break;
-          }
-          case MOTOR_STATE_STARTUP:
-            if (foc_startup_rotor(&hfoc, &hsmo, align_dir, FOC_TS) == 1) {
-              pid_reset(&hfoc.id_ctrl);
-              pid_reset(&hfoc.iq_ctrl);
-              pid_reset(&hfoc.speed_ctrl);
-              smo_set_min_emf(&hsmo, 0.2f);
-              hfoc.state = MOTOR_STATE_CLOSE_LOOP;
-            }
-            break;
-          case MOTOR_STATE_CLOSE_LOOP: {
-            _Bool smo_ret = smo_update_arctan(&hsmo, hfoc.v_alpha, hfoc.v_beta, hfoc.i_alpha, hfoc.i_beta);
-            // float abs_rpm = fabs(smo_get_rotor_speed(&hsmo));
-            if (smo_ret == 0 
-              // || abs_rpm < 10.0f
-            ) {
-              hfoc.state = MOTOR_STATE_IDLE;
-              if (hfoc.control_mode == SPEED_CONTROL_MODE) {
-                hfoc.iq_ref = 0;
-              }
-              break;
-            }
-            hfoc.e_rad = smo_get_rotor_angle(&hsmo);
-            foc_current_control_update(&hfoc);
-            break;
-          }
-        }
-        
-        if (event_loop_count > SPEED_CONTROL_CYCLE) {
-          event_loop_count = 0;
-          hfoc.actual_rpm = -smo_get_rotor_speed(&hsmo);
-          foc_set_flag();
-        }
-        event_loop_count++;
-#else
-        hfoc.e_rad = hfoc.e_angle_rad_comp;
-        foc_current_control_update(&hfoc);
-        //debug
-        smo_update_arctan(&hsmo, hfoc.v_alpha, hfoc.v_beta, hfoc.i_alpha, hfoc.i_beta);
-
-        if (event_loop_count > SPEED_CONTROL_CYCLE) {
-          event_loop_count = 0;
-          uint32_t dt_us = get_dt_us();
-          hfoc.actual_rpm = AS5047P_get_rpm(&hencd, dt_us);
-          foc_set_flag();
-        }
-        event_loop_count++;
+        if (torque_control_update() == 1) {
+#ifndef SENSORLESS_MODE
+          float deg_encd = AS5047P_get_actual_degree(&hencd) * hfoc.gear_ratio;
+          foc_calc_mech_pos_encoder(&hfoc, deg_encd);
 #endif
+          foc_position_control_update(&hfoc, sp_input);
+        }
         break;
       }
       case AUDIO_MODE: {
@@ -1149,6 +1185,9 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef* hadc) {
         test_bw_get_sample();
         break;
       }
+      case POWER_UP_MODE:
+        open_loop_voltage_control(&hfoc, 0.0f, 0.0f, 0.0f);
+      break;
       default:
       break;
     }
@@ -1169,52 +1208,7 @@ void StartControlTask(void const * argument)
   uint32_t blink_tick = 0;
   /* Infinite loop */
   for(;;)
-  {
-    if (is_foc_ready()) {
-      foc_reset_flag();
-
-      switch (hfoc.control_mode) {
-      case TORQUE_CONTROL_MODE:
-        hfoc.id_ref = 0.0f;
-        hfoc.iq_ref = sp_input;
-        break;
-      case SPEED_CONTROL_MODE: {
-#ifdef SENSORLESS_MODE
-        if (hfoc.state == MOTOR_STATE_CLOSE_LOOP) {
-          static float sp_rpm = 0.0f;
-          const float acc_rpm = 5.0f;
-          const float min_rpm = 200.0f;
-
-          if (fabs(sp_rpm) < min_rpm && fabs(sp_input) >= min_rpm) {
-            if (sp_input > 0) sp_rpm = min_rpm;
-            if (sp_input < 0) sp_rpm = -min_rpm;
-          }
-          if (sp_input > sp_rpm) {
-            sp_rpm += acc_rpm;
-          }
-          else if (sp_input < sp_rpm) {
-            sp_rpm -= acc_rpm;
-          }
-          foc_speed_control_update(&hfoc, sp_rpm);
-        }
-#else
-        foc_speed_control_update(&hfoc, sp_input);
-#endif
-        break;
-      }
-#ifndef SENSORLESS_MODE
-      case POSITION_CONTROL_MODE:
-        hfoc.actual_angle = AS5047P_get_actual_degree(&hencd) * hfoc.gear_ratio;
-        foc_position_control_update(&hfoc, test_angle_sp);
-        break;
-#endif
-      case CALIBRATION_MODE:
-        break;
-      default:
-        break;
-      }
-    }
-    
+  { 
     if (hfoc.control_mode == CALIBRATION_MODE) {
       if (start_cal == 1) {
 #ifndef SENSORLESS_MODE
@@ -1222,10 +1216,10 @@ void StartControlTask(void const * argument)
 #endif
 
         measure_R(1.0f);
-        measure_L(400.0f, 1.0f);
+        measure_L(1000.0f, 1.2f);
 
 #ifdef SENSORLESS_MODE
-        smo_update_R_L(&hsmo, m_config.Rs, (m_config.Ld + m_config.Ld) * 0.5);
+        smo_update_R_L(&hsmo, m_config.Rs, (m_config.Ld + m_config.Lq) * 0.5);
 #endif
         flash_auto_tuning_torque_control(&m_config);
         hfoc.id_ctrl.kp = m_config.id_kp;
@@ -1271,6 +1265,30 @@ void StartComTask(void const * argument)
   /* Infinite loop */
   for(;;)
   {
+#if DEBUG_HFI
+    static int sample_index = 0;
+    if (hfoc.collect_sample_flag) {
+      float data[16];
+      uint16_t len = 0;
+
+      if (sample_index == 0) {
+        erase_graph(); 
+        osDelay(1);
+      }
+
+      data[len++] = i_alpha_buff[sample_index];
+      data[len++] = i_beta_buff[sample_index];
+      data[len++] = i_alpha_l_buff[sample_index];
+      data[len++] = i_beta_l_buff[sample_index];
+      send_data_float(data, len);
+      sample_index++;
+      if (sample_index > MAX_SAMPLE_BUFF) {
+        osDelay(1000);
+        sample_index = 0;
+        hfoc.collect_sample_flag = 0;
+      }
+    }
+#else
     if (HAL_GetTick() - debug_tick >= 2) {
       debug_tick = HAL_GetTick();
       float data[16];
@@ -1284,7 +1302,18 @@ void StartComTask(void const * argument)
         break;
       case SPEED_CONTROL_MODE:
         data[len++] = sp_input;
+#ifdef SENSORLESS_MODE
+        if (hfoc.state == MOTOR_STATE_HFI) {
+          data[len++] = hfoc.actual_rpm;
+          data[len++] = 0.0f;
+        }
+        else {
+          data[len++] = 0.0f;
+          data[len++] = hfoc.actual_rpm;
+        }
+#else
         data[len++] = hfoc.actual_rpm;
+#endif
         break;
       case POSITION_CONTROL_MODE:
         data[len++] = sp_input;
@@ -1311,6 +1340,7 @@ void StartComTask(void const * argument)
 
       send_data_float(data, len);
     }
+#endif
 
     if (com_init_flag) {
       last_mode = -1;
@@ -1337,10 +1367,18 @@ void StartComTask(void const * argument)
         change_legend(2, "Iq"); osDelay(1);
         break;
       case SPEED_CONTROL_MODE:
+#ifdef SENSORLESS_MODE
+        send_data_float(data, 3); osDelay(1);
+        change_title("SPEED CONTROL MODE"); osDelay(1);
+        change_legend(0, "set point"); osDelay(1);
+        change_legend(1, "rpm_hfi"); osDelay(1);
+        change_legend(2, "rpm_smo"); osDelay(1);
+#else
         send_data_float(data, 2); osDelay(1);
         change_title("SPEED CONTROL MODE"); osDelay(1);
         change_legend(0, "set point"); osDelay(1);
         change_legend(1, "rpm"); osDelay(1);
+#endif
         break;
       case POSITION_CONTROL_MODE:
         send_data_float(data, 2); osDelay(1);

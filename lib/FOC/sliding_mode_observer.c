@@ -28,7 +28,7 @@ void smo_init(smo_t *hsmo, float Rs, float Ls, float pole_pairs, float Ts) {
     
     hsmo->omega_alpha_filter = 0.05f; //0.02f;
     
-    hsmo->min_operating_emf = 0.2f;
+    hsmo->min_operating_emf = 0.25f;
 
     smo_reset(hsmo);
 }

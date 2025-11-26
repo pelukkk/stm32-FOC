@@ -12,6 +12,8 @@
 #include "FOC_math.h"
 #include "pid_utils.h"
 #include "sliding_mode_observer.h"
+#include "pll.h"
+#include "lpf.h"
 
 #define ERROR_LUT_SIZE (1024)
 
@@ -27,7 +29,11 @@
 #define foc_reset_flag() (foc_ready = 0)
 #define foc_set_flag() (foc_ready = 1)
 
-#define MAX_I_SAMPLE 256
+#define MAX_I_SAMPLE 128
+
+#define MAX_SAMPLE_BUFF 1024
+
+#define DEBUG_HFI	0
 
 /* extern variable */
 extern _Bool foc_ready;
@@ -35,6 +41,13 @@ extern float Vd_buff[MAX_I_SAMPLE];
 extern float Vq_buff[MAX_I_SAMPLE];
 extern float Id_buff[MAX_I_SAMPLE];
 extern float Iq_buff[MAX_I_SAMPLE];
+
+#if DEBUG_HFI
+extern float i_alpha_buff[MAX_SAMPLE_BUFF];
+extern float i_beta_buff[MAX_SAMPLE_BUFF];
+extern float i_alpha_l_buff[MAX_SAMPLE_BUFF];
+extern float i_beta_l_buff[MAX_SAMPLE_BUFF];
+#endif
 
 typedef enum {
 	TORQUE_CONTROL_MODE,
@@ -54,10 +67,10 @@ typedef enum {
   RS, LD, LQ
 }inject_taregt_t;
 
+// state machine for HFI
 typedef enum {
-	MOTOR_STATE_IDLE,
-	MOTOR_STATE_STARTUP,
-	MOTOR_STATE_CLOSE_LOOP
+	MOTOR_STATE_HFI,
+	MOTOR_STATE_SMO
 }motor_state_t;
 
 typedef enum {
@@ -125,6 +138,23 @@ typedef struct {
 	float startup_vd;
 	startup_state_t startup_state;
 	motor_state_t state;
+
+	// test HFI
+	float phase_h;
+	float v_h;
+	float omega_h;
+	float alpha_filter_h;
+	float i_alpha_l; // low-frequency / fundamental
+	float i_beta_l; // low-frequency / fundamental
+	pll_t pll;
+	SecondOrderLPF i_alpha_l_lpf;
+	SecondOrderLPF i_beta_lpf;
+	SecondOrderLPF id_lpf;
+	SecondOrderLPF iq_lpf;
+
+	//debug
+	int sample_index;
+	_Bool collect_sample_flag;
 }foc_t;
 
 void foc_pwm_init(foc_t *hfoc, volatile uint32_t *pwm_a, volatile uint32_t *pwm_b, volatile uint32_t *pwm_c,
@@ -136,6 +166,8 @@ void foc_set_limit_current(foc_t *hfoc, float i_limit);
 void foc_current_control_update(foc_t *hfoc);
 void foc_speed_control_update(foc_t *hfoc, float rpm_reference);
 void foc_position_control_update(foc_t *hfoc, float deg_reference);
+float foc_calc_mech_rpm_encoder(foc_t *hfoc, float encd_rpm);
+float foc_calc_mech_pos_encoder(foc_t *hfoc, float encd_deg);
 void foc_calc_electric_angle(foc_t *hfoc, float m_rad);
 void foc_cal_encoder_misalignment(foc_t *hfoc);
 void foc_cal_encoder(foc_t *hfoc);
@@ -144,7 +176,8 @@ void open_loop_voltage_control(foc_t *hfoc, float vd_ref, float vq_ref, float an
 void meas_inj_dq_process(foc_t *hfoc, float ts);
 void estimate_resistance(foc_t *hfoc);
 void estimate_inductance(foc_t *hfoc, float ts);
-
 int foc_startup_rotor(foc_t *hfoc, smo_t *hsmo, _Bool dir, float dt);
+void foc_current_control_update_hfi(foc_t *hfoc, float Ts);
+void foc_hfi_init(foc_t *hfoc, float v_h, float f_h, float lpf_fc, float Ts);
 
 #endif /* FOC_INC_FOC_UTILS_H_ */
